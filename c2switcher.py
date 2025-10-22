@@ -7,6 +7,7 @@ import atexit
 import contextlib
 import json
 import os
+import random
 import shutil
 import sqlite3
 import subprocess
@@ -224,8 +225,8 @@ def atomic_write_json(path: Path, data: Dict, preserve_permissions: bool = True)
         # Open with explicit mode for security
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
         try:
-            with os.fdopen(fd, 'w') as f:
-                json.dump(data, f, indent=2)
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(data, f)
                 f.flush()
                 os.fsync(f.fileno())  # Ensure data is written to disk
         except:
@@ -878,16 +879,18 @@ class SandboxEnvironment:
             subprocess.run(["claude", "..."], env=env)
     """
 
-    def __init__(self, account_uuid: str, credentials: Dict):
+    def __init__(self, account_uuid: str, credentials: Dict, account_info: Optional[Dict] = None):
         """
         Initialize sandbox environment.
 
         Args:
             account_uuid: Unique account identifier
             credentials: Claude credentials dictionary
+            account_info: Optional account metadata (email, org_uuid, etc.) for .claude.json
         """
         self.account_uuid = account_uuid
         self.credentials = credentials
+        self.account_info = account_info
         self.temp_home = None
         self.temp_claude_dir = None
         self.temp_creds_path = None
@@ -916,30 +919,80 @@ class SandboxEnvironment:
         # Write credentials to sandbox
         atomic_write_json(self.temp_creds_path, self.credentials, preserve_permissions=False)
 
-        # Inherit Claude configuration from real HOME to avoid prompts
-        real_claude_dir = Path.home() / ".claude"
+        # Create .claude.json from template with oauthAccount field
+        sandbox_claude_json = self.temp_home / ".claude.json"
 
-        # Copy .claude.json (global settings)
-        real_claude_json = real_claude_dir / ".claude.json"
-        if real_claude_json.exists():
-            sandbox_claude_json = self.temp_claude_dir / ".claude.json"
-            shutil.copy2(real_claude_json, sandbox_claude_json)
-            # Set secure permissions on copied file
-            with contextlib.suppress(FileNotFoundError, PermissionError, OSError):
-                os.chmod(sandbox_claude_json, 0o600)
+        try:
+            # Base template
+            claude_json = {
+                "numStartups": 4,
+                "installMethod": "unknown",
+                "autoUpdates": False,
+                "tipsHistory": {
+                    "git-worktrees": 0
+                },
+                "cachedStatsigGates": {
+                    "tengu_disable_bypass_permissions_mode": False,
+                    "tengu_tool_pear": False
+                },
+                "cachedDynamicConfigs": {
+                    "tengu-top-of-feed-tip": {
+                        "tip": "",
+                        "color": "dim"
+                    }
+                },
+                "fallbackAvailableWarningThreshold": 0.5,
+                "firstStartTime": f"{datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')}",
+                "sonnet45MigrationComplete": True,
+                "changelogLastFetched": int(time.time() * 1000) - random.randint(3600000, 86400000),
+                "claudeCodeFirstTokenDate": f"{(datetime.now(timezone.utc) - timedelta(days=random.randint(30, 180))).isoformat()}Z",
+                "hasCompletedOnboarding": True,
+                "lastOnboardingVersion": "2.0.25",
+                "hasOpusPlanDefault": False,
+                "lastReleaseNotesSeen": "2.0.25",
+                "subscriptionNoticeCount": 0,
+                "hasAvailableSubscription": False,
+                "bypassPermissionsModeAccepted": True
+            }
 
-        # Copy settings.json (user preferences like terminal theme)
-        real_settings = real_claude_dir / "settings.json"
-        if real_settings.exists():
-            sandbox_settings = self.temp_claude_dir / "settings.json"
-            shutil.copy2(real_settings, sandbox_settings)
-            # Set secure permissions on copied file
-            with contextlib.suppress(FileNotFoundError, PermissionError, OSError):
-                os.chmod(sandbox_settings, 0o600)
+            # Add oauthAccount field with account-specific info if available
+            if self.account_info:
+                claude_json["oauthAccount"] = {
+                    "accountUuid": self.account_info.get("uuid", self.account_uuid),
+                    "emailAddress": self.account_info.get("email", ""),
+                    "organizationUuid": self.account_info.get("org_uuid", ""),
+                    "displayName": self.account_info.get("display_name", ""),
+                    "organizationBillingType": self.account_info.get("billing_type", ""),
+                    "organizationRole": "admin",  # Default since not stored in DB
+                    "workspaceRole": None,
+                    "organizationName": self.account_info.get("org_name", "")
+                }
+
+            atomic_write_json(sandbox_claude_json, claude_json, preserve_permissions=False)
+
+            # Set secure permissions on file
+            os.chmod(sandbox_claude_json, 0o600)
+        except (PermissionError, OSError) as e:
+            # Log warning but continue - not critical for core functionality
+            pass
+
+        # Always write settings.json template
+        sandbox_settings = self.temp_claude_dir / "settings.json"
+
+        try:
+            settings = {
+                "$schema": "https://json.schemastore.org/claude-code-settings.json",
+                "alwaysThinkingEnabled": True
+            }
+            atomic_write_json(sandbox_settings, settings, preserve_permissions=False)
+            os.chmod(sandbox_settings, 0o600)
+        except (PermissionError, OSError):
+            pass  # Best effort
 
         # Create environment with sandboxed HOME
         self.env = os.environ.copy()
         self.env["HOME"] = str(self.temp_home.resolve())
+        self.env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
 
         return self.env
 
@@ -963,13 +1016,18 @@ class SandboxEnvironment:
         Read and return refreshed credentials from sandbox.
 
         Returns:
-            Updated credentials dictionary
+            Updated credentials dictionary, or original credentials if file was deleted
         """
-        with open(self.temp_creds_path, 'r') as f:
-            return json.load(f)
+        try:
+            with open(self.temp_creds_path, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            # Claude Code might have deleted the credentials file if auth failed
+            # Return the original credentials in this case
+            return self.credentials
 
 
-def refresh_token_via_claude(credentials_json: str, account_uuid: Optional[str] = None) -> Dict:
+def refresh_token_via_claude(credentials_json: str, account_uuid: Optional[str] = None, account_info: Optional[Dict] = None) -> Dict:
     """
     Refresh token using a sandboxed per-account HOME directory.
 
@@ -980,6 +1038,7 @@ def refresh_token_via_claude(credentials_json: str, account_uuid: Optional[str] 
     Args:
         credentials_json: JSON string of credentials to refresh
         account_uuid: Account UUID for sandbox directory. If None, uses a bootstrap hash.
+        account_info: Optional account metadata (email, org_uuid, etc.) for .claude.json patching
     """
     # Parse credentials
     creds = json.loads(credentials_json)
@@ -999,32 +1058,36 @@ def refresh_token_via_claude(credentials_json: str, account_uuid: Optional[str] 
         account_uuid = f"bootstrap-{creds_hash}"
 
     # Use sandboxed environment with automatic cleanup
-    sandbox = SandboxEnvironment(account_uuid, creds)
+    sandbox = SandboxEnvironment(account_uuid, creds, account_info)
     with sandbox as env:
-        # Try /status command first (doesn't consume usage)
-        try:
-            result = subprocess.run(
-                ["claude", "-p", "/status", "--verbose", "--output-format=json"],
-                timeout=30,
-                capture_output=True,
-                check=False,
-                env=env
-            )
+        # 10% chance to skip /status and go directly to fallback
+        use_fallback = random.random() < 0.1
 
-            # Read credentials to check if token was refreshed
-            refreshed_creds = sandbox.get_refreshed_credentials()
+        if not use_fallback:
+            # Try /status command first (doesn't consume usage)
+            try:
+                result = subprocess.run(
+                    ["claude", "-p", "/status", "--verbose", "--output-format=json"],
+                    timeout=30,
+                    capture_output=True,
+                    check=False,
+                    env=env
+                )
 
-            # Check if token was actually refreshed
-            new_expires_at = refreshed_creds.get("claudeAiOauth", {}).get("expiresAt", 0)
-            if new_expires_at > expires_at:
-                # Token successfully refreshed
-                return refreshed_creds
+                # Read credentials to check if token was refreshed
+                refreshed_creds = sandbox.get_refreshed_credentials()
 
-            # If /status didn't refresh, fall back to actual prompt
-            console.print("[yellow]Status check didn't refresh token, using fallback...[/yellow]")
+                # Check if token was actually refreshed
+                new_expires_at = refreshed_creds.get("claudeAiOauth", {}).get("expiresAt", 0)
+                if new_expires_at > expires_at:
+                    # Token successfully refreshed
+                    return refreshed_creds
 
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
+                # If /status didn't refresh, fall back to actual prompt
+                console.print("[yellow]Status check didn't refresh token, using fallback...[/yellow]")
+
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                pass
 
         # Fallback: Run with actual prompt
         try:
@@ -1065,8 +1128,23 @@ def get_account_usage(db: Database, account_uuid: str, credentials_json: str, fo
         if cached:
             return cached
 
+    # Fetch account info for sandbox .claude.json patching
+    cursor = db.conn.cursor()
+    cursor.execute("SELECT uuid, email, org_uuid, display_name, billing_type, org_name FROM accounts WHERE uuid = ?", (account_uuid,))
+    row = cursor.fetchone()
+    account_info = None
+    if row:
+        account_info = {
+            "uuid": row[0],
+            "email": row[1],
+            "org_uuid": row[2],
+            "display_name": row[3],
+            "billing_type": row[4],
+            "org_name": row[5]
+        }
+
     # Refresh token if needed
-    refreshed_creds = refresh_token_via_claude(credentials_json, account_uuid)
+    refreshed_creds = refresh_token_via_claude(credentials_json, account_uuid, account_info)
     token = refreshed_creds.get("claudeAiOauth", {}).get("accessToken")
 
     if not token:
