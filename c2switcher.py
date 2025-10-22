@@ -3,14 +3,16 @@
 Claude Code Account Switcher - Manage multiple Claude Code accounts
 """
 
-import os
+import atexit
+import fcntl
 import json
+import os
+import shutil
 import sqlite3
 import subprocess
-import time
-import fcntl
 import sys
-from datetime import datetime, timedelta
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 import requests
@@ -22,9 +24,11 @@ from rich.panel import Panel
 from rich import box
 
 console = Console()
+err_console = Console(stderr=True)
 
 # Paths
-DB_PATH = Path.home() / ".c2switcher.db"
+C2SWITCHER_DIR = Path.home() / ".c2switcher"
+DB_PATH = C2SWITCHER_DIR / "store.db"
 LOCK_PATH = Path.home() / ".c2switcher.lock"
 CLAUDE_DIR = Path.home() / ".claude"
 CREDENTIALS_PATH = CLAUDE_DIR / ".credentials.json"
@@ -109,10 +113,10 @@ class FileLock:
 
             except Exception as e:
                 if self.lock_file:
-                self.lock_file.close()
-                self.lock_file = None
-            console.print(f"[red]Error acquiring lock: {e}[/red]")
-            sys.exit(1)
+                    self.lock_file.close()
+                    self.lock_file = None
+                console.print(f"[red]Error acquiring lock: {e}[/red]")
+                sys.exit(1)
 
     def release(self):
         """Release the lock"""
@@ -153,7 +157,6 @@ def acquire_lock():
     _lock_acquired = lock
 
     # Register cleanup on exit
-    import atexit
     atexit.register(_release_lock)
 
 
@@ -181,12 +184,90 @@ def mask_email(email: str) -> str:
     return f"{masked_local}@{domain}"
 
 
+def atomic_write_json(path: Path, data: Dict, preserve_permissions: bool = True):
+    """
+    Atomically write JSON data to a file.
+
+    Uses a temporary file and os.replace() to ensure atomic writes.
+    Optionally preserves existing file permissions.
+
+    Args:
+        path: Target file path
+        data: Dictionary to write as JSON
+        preserve_permissions: If True, copy permissions from existing file
+    """
+    # Query existing permissions if requested
+    mode = 0o600  # Default: owner read/write only
+    if preserve_permissions and path.exists():
+        try:
+            stat_info = path.stat()
+            mode = stat_info.st_mode & 0o777  # Extract permission bits
+        except OSError:
+            pass  # Fall back to default
+
+    # Write to temporary file
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    try:
+        # Open with explicit mode for security
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        try:
+            with os.fdopen(fd, 'w') as f:
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())  # Ensure data is written to disk
+        except:
+            # If fdopen succeeded, fd is now owned by the file object
+            # and will be closed when we exit the with block
+            raise
+
+        # Atomically replace original file
+        os.replace(tmp_path, path)
+
+        # Ensure permissions are set (in case umask interfered)
+        os.chmod(path, mode)
+    except:
+        # Clean up temp file on error
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def parse_sqlite_timestamp_to_local(timestamp) -> datetime:
+    """
+    Parse a SQLite timestamp (string or datetime) and convert to local naive datetime.
+
+    SQLite CURRENT_TIMESTAMP returns UTC timestamps. This function handles:
+    - String timestamps in ISO format (with or without 'Z' suffix)
+    - Datetime objects (naive or timezone-aware)
+
+    Returns a naive datetime in local timezone for consistent display.
+
+    Args:
+        timestamp: SQLite timestamp (string or datetime object)
+
+    Returns:
+        Naive datetime in local timezone
+    """
+    if isinstance(timestamp, str):
+        # Parse ISO format string, handling 'Z' suffix
+        dt_utc = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        # Ensure it's treated as UTC if naive
+        if dt_utc.tzinfo is None:
+            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+        # Convert to local time and make naive
+        return dt_utc.astimezone().replace(tzinfo=None)
+    else:
+        # Already a datetime object, return as-is
+        return timestamp
+
+
 def is_session_alive(session: Dict) -> bool:
     """
     Multi-factor liveness check using process fingerprinting.
     Verifies PID, create_time, and exe path to prevent false positives from PID reuse.
     """
-    import os
     debug = os.environ.get('DEBUG_SESSIONS') == '1'
 
     try:
@@ -357,74 +438,74 @@ class Database:
         if not uuid:
             raise ValueError("Invalid profile data: missing account UUID")
 
-        cursor = self.conn.cursor()
+        # Use transaction to ensure atomicity
+        with self.conn:
+            cursor = self.conn.cursor()
 
-        # Check if account exists
-        cursor.execute("SELECT id, index_num FROM accounts WHERE uuid = ?", (uuid,))
-        existing = cursor.fetchone()
+            # Check if account exists
+            cursor.execute("SELECT id, index_num FROM accounts WHERE uuid = ?", (uuid,))
+            existing = cursor.fetchone()
 
-        if existing:
-            # Update existing account
-            cursor.execute("""
-                UPDATE accounts SET
-                    nickname = COALESCE(?, nickname),
-                    email = ?,
-                    full_name = ?,
-                    display_name = ?,
-                    has_claude_max = ?,
-                    has_claude_pro = ?,
-                    org_uuid = ?,
-                    org_name = ?,
-                    org_type = ?,
-                    billing_type = ?,
-                    rate_limit_tier = ?,
-                    credentials_json = ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE uuid = ?
-            """, (
-                nickname,
-                account.get("email"),
-                account.get("full_name"),
-                account.get("display_name"),
-                account.get("has_claude_max", False),
-                account.get("has_claude_pro", False),
-                org.get("uuid"),
-                org.get("name"),
-                org.get("organization_type"),
-                org.get("billing_type"),
-                org.get("rate_limit_tier"),
-                json.dumps(credentials),
-                uuid
-            ))
-            self.conn.commit()
-            return existing[1]  # Return existing index
-        else:
-            # Insert new account
-            index_num = self.get_next_index()
-            cursor.execute("""
-                INSERT INTO accounts (
-                    uuid, index_num, nickname, email, full_name, display_name,
-                    has_claude_max, has_claude_pro, org_uuid, org_name, org_type,
-                    billing_type, rate_limit_tier, credentials_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                uuid,
-                index_num,
-                nickname,
-                account.get("email"),
-                account.get("full_name"),
-                account.get("display_name"),
-                account.get("has_claude_max", False),
-                account.get("has_claude_pro", False),
-                org.get("uuid"),
-                org.get("name"),
-                org.get("organization_type"),
-                org.get("billing_type"),
-                org.get("rate_limit_tier"),
-                json.dumps(credentials)
-            ))
-            self.conn.commit()
-            return index_num
+            if existing:
+                # Update existing account
+                cursor.execute("""
+                    UPDATE accounts SET
+                        nickname = COALESCE(?, nickname),
+                        email = ?,
+                        full_name = ?,
+                        display_name = ?,
+                        has_claude_max = ?,
+                        has_claude_pro = ?,
+                        org_uuid = ?,
+                        org_name = ?,
+                        org_type = ?,
+                        billing_type = ?,
+                        rate_limit_tier = ?,
+                        credentials_json = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE uuid = ?
+                """, (
+                    nickname,
+                    account.get("email"),
+                    account.get("full_name"),
+                    account.get("display_name"),
+                    account.get("has_claude_max", False),
+                    account.get("has_claude_pro", False),
+                    org.get("uuid"),
+                    org.get("name"),
+                    org.get("organization_type"),
+                    org.get("billing_type"),
+                    org.get("rate_limit_tier"),
+                    json.dumps(credentials),
+                    uuid
+                ))
+                return existing[1]  # Return existing index
+            else:
+                # Insert new account
+                index_num = self.get_next_index()
+                cursor.execute("""
+                    INSERT INTO accounts (
+                        uuid, index_num, nickname, email, full_name, display_name,
+                        has_claude_max, has_claude_pro, org_uuid, org_name, org_type,
+                        billing_type, rate_limit_tier, credentials_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    uuid,
+                    index_num,
+                    nickname,
+                    account.get("email"),
+                    account.get("full_name"),
+                    account.get("display_name"),
+                    account.get("has_claude_max", False),
+                    account.get("has_claude_pro", False),
+                    org.get("uuid"),
+                    org.get("name"),
+                    org.get("organization_type"),
+                    org.get("billing_type"),
+                    org.get("rate_limit_tier"),
+                    json.dumps(credentials)
+                ))
+                return index_num
 
     def add_usage(self, account_uuid: str, usage_data: Dict):
         """Add usage data to history"""
@@ -715,12 +796,104 @@ class ClaudeAPI:
         return response.json()
 
 
+class SandboxEnvironment:
+    """
+    Context manager for isolated Claude Code sandbox environment.
+
+    Creates a temporary HOME directory with Claude configuration inherited
+    from the real HOME to avoid prompts for terminal theme and other settings.
+    Automatically cleans up on exit.
+
+    Usage:
+        with SandboxEnvironment(account_uuid, credentials) as env:
+            subprocess.run(["claude", "..."], env=env)
+    """
+
+    def __init__(self, account_uuid: str, credentials: Dict):
+        """
+        Initialize sandbox environment.
+
+        Args:
+            account_uuid: Unique account identifier
+            credentials: Claude credentials dictionary
+        """
+        self.account_uuid = account_uuid
+        self.credentials = credentials
+        self.temp_home = None
+        self.temp_claude_dir = None
+        self.temp_creds_path = None
+        self.env = None
+
+    def __enter__(self) -> Dict[str, str]:
+        """
+        Set up sandbox environment.
+
+        Returns:
+            Environment dictionary with sandboxed HOME
+        """
+        # Create per-account temporary directory
+        self.temp_home = Path.home() / ".c2switcher" / "tmp" / self.account_uuid
+        self.temp_claude_dir = self.temp_home / ".claude"
+        self.temp_claude_dir.mkdir(parents=True, exist_ok=True)
+        self.temp_creds_path = self.temp_claude_dir / ".credentials.json"
+
+        # Write credentials to sandbox
+        atomic_write_json(self.temp_creds_path, self.credentials, preserve_permissions=False)
+
+        # Inherit Claude configuration from real HOME to avoid prompts
+        real_claude_dir = Path.home() / ".claude"
+
+        # Copy .claude.json (global settings)
+        real_claude_json = real_claude_dir / ".claude.json"
+        if real_claude_json.exists():
+            sandbox_claude_json = self.temp_claude_dir / ".claude.json"
+            shutil.copy2(real_claude_json, sandbox_claude_json)
+
+        # Copy settings.json (user preferences like terminal theme)
+        real_settings = real_claude_dir / "settings.json"
+        if real_settings.exists():
+            sandbox_settings = self.temp_claude_dir / "settings.json"
+            shutil.copy2(real_settings, sandbox_settings)
+
+        # Create environment with sandboxed HOME
+        self.env = os.environ.copy()
+        self.env["HOME"] = str(self.temp_home.resolve())
+
+        return self.env
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        Clean up sandbox environment.
+
+        Removes the temporary directory tree.
+        """
+        if self.temp_home and self.temp_home.exists():
+            try:
+                shutil.rmtree(self.temp_home)
+            except Exception as e:
+                # Log warning but don't fail - cleanup is best-effort
+                pass
+
+        return False  # Don't suppress exceptions
+
+    def get_refreshed_credentials(self) -> Dict:
+        """
+        Read and return refreshed credentials from sandbox.
+
+        Returns:
+            Updated credentials dictionary
+        """
+        with open(self.temp_creds_path, 'r') as f:
+            return json.load(f)
+
+
 def refresh_token_via_claude(credentials_json: str, account_uuid: str) -> Dict:
     """
     Refresh token using a sandboxed per-account HOME directory.
 
     This prevents interfering with any running Claude instances by using
-    a temporary directory that won't affect the global ~/.claude/.credentials.json
+    a temporary directory that won't affect the global ~/.claude/.credentials.json.
+    Configuration files are inherited to avoid prompts for terminal theme, etc.
     """
     # Parse credentials
     creds = json.loads(credentials_json)
@@ -733,66 +906,63 @@ def refresh_token_via_claude(credentials_json: str, account_uuid: str) -> Dict:
 
     console.print("[yellow]Token expired, refreshing via Claude Code...[/yellow]")
 
-    # Create per-account temporary directory
-    temp_home = Path.home() / ".c2switcher" / "tmp" / account_uuid
-    temp_claude_dir = temp_home / ".claude"
-    temp_claude_dir.mkdir(parents=True, exist_ok=True)
-    temp_creds_path = temp_claude_dir / ".credentials.json"
+    # Use sandboxed environment with automatic cleanup
+    sandbox = SandboxEnvironment(account_uuid, creds)
+    with sandbox as env:
+        # Try /status command first (doesn't consume usage)
+        try:
+            result = subprocess.run(
+                ["claude", "-p", "/status", "--verbose", "--output-format=json"],
+                timeout=30,
+                capture_output=True,
+                check=False,
+                env=env
+            )
 
-    # Write credentials to temp location
-    with open(temp_creds_path, 'w') as f:
-        json.dump(creds, f)
+            # Read credentials to check if token was refreshed
+            refreshed_creds = sandbox.get_refreshed_credentials()
 
-    # Set up environment with sandboxed HOME
-    env = os.environ.copy()
-    env["HOME"] = str(temp_home.resolve())
+            # Check if token was actually refreshed
+            new_expires_at = refreshed_creds.get("claudeAiOauth", {}).get("expiresAt", 0)
+            if new_expires_at > expires_at:
+                # Token successfully refreshed
+                return refreshed_creds
 
-    # Try /status command first (doesn't consume usage)
-    try:
-        result = subprocess.run(
-            ["claude", "-p", "/status", "--verbose", "--output-format=json"],
-            timeout=30,
-            capture_output=True,
-            check=False,
-            env=env
-        )
+            # If /status didn't refresh, fall back to actual prompt
+            console.print("[yellow]Status check didn't refresh token, using fallback...[/yellow]")
 
-        # Read credentials to check if token was refreshed
-        with open(temp_creds_path, 'r') as f:
-            refreshed_creds = json.load(f)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
 
-        # Check if token was actually refreshed
-        new_expires_at = refreshed_creds.get("claudeAiOauth", {}).get("expiresAt", 0)
-        if new_expires_at > expires_at:
-            # Token successfully refreshed
-            return refreshed_creds
+        # Fallback: Run with actual prompt
+        try:
+            subprocess.run(
+                ["claude", "-p", "hi", "--model", "haiku"],
+                timeout=30,
+                capture_output=True,
+                check=False,
+                env=env
+            )
+        except subprocess.TimeoutExpired:
+            pass
+        except FileNotFoundError:
+            console.print("[red]Error: 'claude' command not found. Please ensure Claude Code is installed.[/red]")
+            raise
 
-        # If /status didn't refresh, fall back to actual prompt
-        console.print("[yellow]Status check didn't refresh token, using fallback...[/yellow]")
+        # Read refreshed credentials
+        refreshed_creds = sandbox.get_refreshed_credentials()
 
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+        # Check if refresh was successful
+        final_expires_at = refreshed_creds.get("claudeAiOauth", {}).get("expiresAt", 0)
+        if final_expires_at <= expires_at:
+            # Token wasn't refreshed - likely revoked or invalid
+            console.print("[red]Error: Failed to refresh token. The credentials may be revoked or invalid.[/red]")
+            raise ValueError(
+                "Token refresh failed after multiple attempts. "
+                "Please re-authenticate by logging in to Claude Code with this account."
+            )
 
-    # Fallback: Run with actual prompt
-    try:
-        subprocess.run(
-            ["claude", "-p", "hi", "--model", "haiku"],
-            timeout=30,
-            capture_output=True,
-            check=False,
-            env=env
-        )
-    except subprocess.TimeoutExpired:
-        pass
-    except FileNotFoundError:
-        console.print("[red]Error: 'claude' command not found. Please ensure Claude Code is installed.[/red]")
-        raise
-
-    # Read refreshed credentials
-    with open(temp_creds_path, 'r') as f:
-        refreshed_creds = json.load(f)
-
-    return refreshed_creds
+        return refreshed_creds
 
 
 def get_account_usage(db: Database, account_uuid: str, credentials_json: str, force: bool = False) -> Dict:
@@ -884,9 +1054,15 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
             active_sessions = db.count_active_sessions(acc['uuid'])
             recent_sessions = db.count_recent_sessions(acc['uuid'], minutes=5)
 
-            # Session penalties:
-            # - 15 points per active session (currently running)
-            # - 5 points per recent session (ran in last 5min, for rate limiting)
+            # Session penalties (load balancing weights):
+            # - 15 points per active session: Accounts with active sessions are heavily
+            #   penalized to distribute load and avoid rate limits. A 15-point penalty
+            #   means we prefer accounts with up to 15% more usage over ones with active sessions.
+            # - 5 points per recent session (last 5min): Lighter penalty for rate limiting
+            #   prevention. Distributes burst load without being too aggressive.
+            #
+            # Example: Account A at 50% usage with 2 active sessions (score=80) vs
+            #          Account B at 70% usage with 0 sessions (score=70) -> B is selected.
             session_penalty = (active_sessions * 15) + (recent_sessions * 5)
 
             # Determine tier and calculate score
@@ -1206,15 +1382,7 @@ def usage(output_json: bool, force: bool):
 
                     # Format time ago
                     started = session['created_at']
-                    if isinstance(started, str):
-                        # SQLite CURRENT_TIMESTAMP is UTC - convert to local time
-                        from datetime import timezone
-                        started_dt_utc = datetime.fromisoformat(started.replace('Z', '+00:00'))
-                        if started_dt_utc.tzinfo is None:
-                            started_dt_utc = started_dt_utc.replace(tzinfo=timezone.utc)
-                        started_dt = started_dt_utc.astimezone().replace(tzinfo=None)
-                    else:
-                        started_dt = started
+                    started_dt = parse_sqlite_timestamp_to_local(started)
 
                     time_ago = datetime.now() - started_dt
                     if time_ago.total_seconds() < 60:
@@ -1292,8 +1460,7 @@ def optimal(switch: bool, session_id: Optional[str]):
             # Write credentials
             credentials = json.loads(optimal_acc["credentials_json"])
             CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
-            with open(CREDENTIALS_PATH, 'w') as f:
-                json.dump(credentials, f, indent=2)
+            atomic_write_json(CREDENTIALS_PATH, credentials)
 
             # Optionally display success message
             if not session_id:
@@ -1322,8 +1489,7 @@ def switch(identifier: str):
         # Write credentials
         credentials = json.loads(account["credentials_json"])
         CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
-        with open(CREDENTIALS_PATH, 'w') as f:
-            json.dump(credentials, f, indent=2)
+        atomic_write_json(CREDENTIALS_PATH, credentials)
 
         nickname = account['nickname'] or '[dim]none[/dim]'
         masked_email = mask_email(account['email'])
@@ -1393,8 +1559,7 @@ def cycle():
         # Write credentials
         credentials = json.loads(next_account["credentials_json"])
         CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
-        with open(CREDENTIALS_PATH, 'w') as f:
-            json.dump(credentials, f, indent=2)
+        atomic_write_json(CREDENTIALS_PATH, credentials)
 
         nickname = next_account['nickname'] or '[dim]none[/dim]'
         masked_email = mask_email(next_account['email'])
@@ -1411,40 +1576,32 @@ def cycle():
 
 
 # Command aliases
-@cli.command(name="list")
-@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
-def list_alias(output_json: bool):
+@cli.command(name="list", hidden=True)
+@click.pass_context
+def list_alias(ctx):
     """List all accounts (alias for 'ls')"""
-    from click import Context
-    ctx = Context(list_accounts_cmd)
-    ctx.invoke(list_accounts_cmd, output_json=output_json)
+    ctx.forward(list_accounts_cmd)
 
 
-@cli.command(name="list-accounts")
-@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
-def list_accounts_alias(output_json: bool):
+@cli.command(name="list-accounts", hidden=True)
+@click.pass_context
+def list_accounts_alias(ctx):
     """List all accounts (alias for 'ls')"""
-    from click import Context
-    ctx = Context(list_accounts_cmd)
-    ctx.invoke(list_accounts_cmd, output_json=output_json)
+    ctx.forward(list_accounts_cmd)
 
 
-@cli.command(name="pick")
-@click.option("--switch", is_flag=True, help="Actually switch to the optimal account")
-def pick(switch: bool):
+@cli.command(name="pick", hidden=True)
+@click.pass_context
+def pick(ctx):
     """Find the optimal account to use (alias for 'optimal')"""
-    from click import Context
-    ctx = Context(optimal)
-    ctx.invoke(optimal, switch=switch)
+    ctx.forward(optimal)
 
 
-@cli.command(name="use")
-@click.argument("identifier")
-def use(identifier: str):
+@cli.command(name="use", hidden=True)
+@click.pass_context
+def use(ctx):
     """Switch to a specific account (alias for 'switch')"""
-    from click import Context
-    ctx = Context(switch)
-    ctx.invoke(switch, identifier=identifier)
+    ctx.forward(switch)
 
 
 @cli.command(name="start-session")
@@ -1485,7 +1642,7 @@ def start_session(session_id: str, pid: int, parent_pid: Optional[int], cwd: str
         # Silently succeed - wrapper redirects stderr to /dev/null
     except Exception as e:
         # Log error but don't fail the wrapper
-        console.print(f"[yellow]Warning: Failed to register session: {e}[/yellow]", err=True)
+        err_console.print(f"[yellow]Warning: Failed to register session: {e}[/yellow]")
     finally:
         db.close()
 
@@ -1501,7 +1658,7 @@ def end_session(session_id: str):
         db.mark_session_ended(session_id)
         # Silently succeed
     except Exception as e:
-        console.print(f"[yellow]Warning: Failed to end session: {e}[/yellow]", err=True)
+        err_console.print(f"[yellow]Warning: Failed to end session: {e}[/yellow]")
     finally:
         db.close()
 
@@ -1539,15 +1696,7 @@ def list_sessions():
 
             # Format started time
             started = session['created_at']
-            if isinstance(started, str):
-                # SQLite CURRENT_TIMESTAMP is UTC - convert to local time
-                from datetime import timezone
-                started_dt_utc = datetime.fromisoformat(started.replace('Z', '+00:00'))
-                if started_dt_utc.tzinfo is None:
-                    started_dt_utc = started_dt_utc.replace(tzinfo=timezone.utc)
-                started_dt = started_dt_utc.astimezone().replace(tzinfo=None)
-            else:
-                started_dt = started
+            started_dt = parse_sqlite_timestamp_to_local(started)
 
             time_ago = datetime.now() - started_dt
             if time_ago.total_seconds() < 60:
@@ -1683,15 +1832,7 @@ def session_history(limit: int, min_duration: int):
 
             # Format ended time
             ended = session['ended_at']
-            if isinstance(ended, str):
-                # SQLite CURRENT_TIMESTAMP is UTC - convert to local time
-                from datetime import timezone
-                ended_dt_utc = datetime.fromisoformat(ended.replace('Z', '+00:00'))
-                if ended_dt_utc.tzinfo is None:
-                    ended_dt_utc = ended_dt_utc.replace(tzinfo=timezone.utc)
-                ended_dt = ended_dt_utc.astimezone().replace(tzinfo=None)
-            else:
-                ended_dt = ended
+            ended_dt = parse_sqlite_timestamp_to_local(ended)
 
             time_ago = datetime.now() - ended_dt
             if time_ago.total_seconds() < 60:
@@ -1723,14 +1864,11 @@ def session_history(limit: int, min_duration: int):
         db.close()
 
 
-@cli.command(name="history")
-@click.option("--limit", default=20, type=int, help="Maximum number of sessions to show")
-@click.option("--min-duration", default=5, type=int, help="Minimum session duration in seconds")
-def history_alias(limit: int, min_duration: int):
+@cli.command(name="history", hidden=True)
+@click.pass_context
+def history_alias(ctx):
     """Show historical sessions (alias for 'session-history')"""
-    from click import Context
-    ctx = Context(session_history)
-    ctx.invoke(session_history, limit=limit, min_duration=min_duration)
+    ctx.forward(session_history)
 
 
 if __name__ == "__main__":
