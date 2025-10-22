@@ -286,7 +286,7 @@ All commands support:
 
 ### Database
 
-All data is stored in `~/.c2switcher.db` (SQLite):
+All data is stored in `~/.c2switcher/store.db` (SQLite):
 
 - Account credentials and metadata
 - Usage history with timestamps
@@ -300,6 +300,15 @@ When a token expires, c2switcher automatically refreshes it:
 2. Falls back to: `claude -p hi --model haiku` if needed
 
 This ensures tokens stay valid with minimal to no usage consumption.
+
+**Sandboxed Refresh**: Token refresh operations run in an isolated temporary HOME directory (`~/.c2switcher/tmp/{account_uuid}`) to avoid interfering with any running Claude Code instances. User preferences (terminal theme, settings) are inherited from the real HOME to prevent prompts. The sandbox is automatically cleaned up after each refresh.
+
+If refresh fails (e.g., revoked or invalid credentials), you'll see:
+
+```
+Error: Failed to refresh token. The credentials may be revoked or invalid.
+Please re-authenticate by logging in to Claude Code with this account.
+```
 
 ### Usage Caching
 
@@ -339,12 +348,13 @@ Dead sessions are automatically cleaned up using multi-factor liveness checks.
 
 ## Files and Paths
 
-| Path                          | Purpose                                     |
-| ----------------------------- | ------------------------------------------- |
-| `~/.c2switcher.db`            | SQLite database (accounts, usage, sessions) |
-| `~/.claude/.credentials.json` | Active Claude Code credentials              |
-| `/usr/local/bin/c2switcher`   | CLI tool                                    |
-| `/usr/local/bin/c2claude`     | Wrapper script                              |
+| Path                             | Purpose                                        |
+| -------------------------------- | ---------------------------------------------- |
+| `~/.c2switcher/store.db`         | SQLite database (accounts, usage, sessions)    |
+| `~/.c2switcher/tmp/{uuid}/`      | Sandboxed temp directories for token refresh   |
+| `~/.claude/.credentials.json`    | Active Claude Code credentials                 |
+| `/usr/local/bin/c2switcher`      | CLI tool                                       |
+| `/usr/local/bin/c2claude`        | Wrapper script                                 |
 
 ## Uninstallation
 
@@ -365,8 +375,8 @@ sudo rm /usr/local/bin/c2switcher /usr/local/bin/c2claude
 # Remove plasmoid
 kpackagetool6 --type=Plasma/Applet --remove org.claudecode.usage.plasma
 
-# Remove database (optional)
-rm ~/.c2switcher.db
+# Remove all c2switcher data (optional)
+rm -rf ~/.c2switcher/
 ```
 
 ## Examples
@@ -442,6 +452,14 @@ export PATH="/usr/local/bin:$PATH"
 Add to `~/.bashrc` or `~/.zshrc` to make permanent.
 
 ### Token refresh fails
+
+If you see "Failed to refresh token. The credentials may be revoked or invalid":
+
+1. Log in to Claude Code with that account to generate fresh credentials
+2. Re-add the account to c2switcher:
+   ```bash
+   c2switcher add --nickname <name>
+   ```
 
 Make sure the `claude` command works:
 
