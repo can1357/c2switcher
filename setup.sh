@@ -147,7 +147,7 @@ if [[ "$INSTALL_CLI" == true ]]; then
     echo -e "${BLUE}Checking Python dependencies...${NC}"
     missing_deps=()
 
-    for dep in click rich requests psutil; do
+    for dep in click rich requests psutil filelock; do
         if ! python3 -c "import $dep" 2>/dev/null; then
             missing_deps+=("$dep")
         fi
