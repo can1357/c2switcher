@@ -97,9 +97,9 @@ Output:
 ╭───────┬──────────┬────────────────────┬───────────┬──────┬───────────────────╮
 │ Index │ Nickname │ Email              │ Name      │ Type │ Tier              │
 ├───────┼──────────┼────────────────────┼───────────┼──────┼───────────────────┤
-│   0   │ main     │ ****@gmail.com     │ ****      │ Max  │ default_claude_m... │
-│   1   │ work     │ ****@gmail.com     │ ****      │ Max  │ default_claude_m... │
-│   2   │ personal │ ****@gmail.com     │ ****      │ Max  │ default_claude_m... │
+│   0   │ main     │ ****@gmail.com     │ ****      │ Max  │ default_claude... │
+│   1   │ work     │ ****@gmail.com     │ ****      │ Max  │ default_claude... │
+│   2   │ personal │ ****@gmail.com     │ ****      │ Max  │ default_claude... │
 ╰───────┴──────────┴────────────────────┴───────────┴──────┴───────────────────╯
 ```
 
