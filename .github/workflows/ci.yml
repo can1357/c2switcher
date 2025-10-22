@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  lint-and-check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install ruff
+
+    - name: Lint with ruff
+      run: |
+        # Stop the build if there are Python syntax errors or undefined names
+        ruff check c2switcher.py --select=E9,F63,F7,F82 --output-format=full
+        # Warn on other issues but don't fail
+        ruff check c2switcher.py --exit-zero
+
+    - name: Check Python syntax
+      run: |
+        python -m py_compile c2switcher.py
+
+    - name: Verify imports
+      run: |
+        python -c "import c2switcher; print('✓ c2switcher imports successfully')"
+
+    - name: Check entry point
+      run: |
+        python c2switcher.py --help
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Run ShellCheck
+      uses: ludeeus/action-shellcheck@master
+      with:
+        scandir: '.'
+        severity: warning

@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# c2claude - Claude Code wrapper with account switching via c2switcher
+#
+# Usage:
+#   c2claude [options] [claude arguments...]
+#
+# Options:
+#   -1, -2, -3       Switch to account by index (0, 1, 2)
+#   -a, --account N  Switch to account N (by index, nickname, or email)
+#   -o, --optimal    Use the optimal account (lowest usage)
+#   -c, --cycle      Cycle to the next account
+#   (no option)      Use current account with load balancing, or optimal if none set
+#
+# Examples:
+#   c2claude -1            # Switch to account 0 and run claude
+#   c2claude -2 -p hi      # Switch to account 1 and run claude -p hi
+#   c2claude --optimal     # Use optimal account with load balancing
+#   c2claude --cycle       # Cycle to next account
+#   c2claude               # Use load-balanced account selection
+
+set -e
+
+selected_account=""
+use_optimal=true
+cycle=false
+remaining_args=()
+
+# Generate unique session ID
+if command -v uuidgen &> /dev/null; then
+    SESSION_ID=$(uuidgen)
+else
+    # Fallback: use random number + timestamp if uuidgen not available
+    SESSION_ID="session-$$-$(date +%s)-$RANDOM"
+fi
+
+# Get parent shell PID for tracking
+PARENT_PID=$PPID
+
+# Cleanup function to end session
+cleanup_session() {
+    c2switcher end-session --session-id "$SESSION_ID" 2>/dev/null || true
+}
+
+# Register cleanup to run on exit (success or failure)
+trap cleanup_session EXIT INT TERM
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -1)
+            selected_account="0"
+            shift
+            ;;
+        -2)
+            selected_account="1"
+            shift
+            ;;
+        -3)
+            selected_account="2"
+            shift
+            ;;
+        --account|-a)
+            selected_account="$2"
+            shift 2
+            ;;
+        --optimal|-o)
+            use_optimal=true
+            shift
+            ;;
+        --cycle|-c)
+            cycle=true
+            shift
+            ;;
+        *)
+            remaining_args+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Register session start
+c2switcher start-session \
+    --session-id "$SESSION_ID" \
+    --pid $$ \
+    --parent-pid "$PARENT_PID" \
+    --cwd "$(pwd)" \
+    2>/dev/null || true
+
+# Determine which account to use
+if [[ "$use_optimal" == true ]]; then
+    # Use optimal account with load balancing
+    c2switcher optimal --session-id "$SESSION_ID" --switch 2>/dev/null
+elif [[ -n "$selected_account" ]]; then
+    # Switch to specific account (no session tracking)
+    c2switcher switch "$selected_account"
+elif [[ "$cycle" == true ]]; then
+    # Cycle through accounts (no session tracking)
+    c2switcher cycle
+fi
+
+# Run claude with remaining arguments (don't use exec - we need to cleanup after)
+claude "${remaining_args[@]}"
+EXIT_CODE=$?
+
+# Cleanup happens via trap, but also explicitly call it here
+cleanup_session
+
+exit $EXIT_CODE
