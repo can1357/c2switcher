@@ -49,18 +49,22 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -1)
             selected_account="0"
+            use_optimal=false
             shift
             ;;
         -2)
             selected_account="1"
+            use_optimal=false
             shift
             ;;
         -3)
             selected_account="2"
+            use_optimal=false
             shift
             ;;
         --account|-a)
             selected_account="$2"
+            use_optimal=false
             shift 2
             ;;
         --optimal|-o)
@@ -69,6 +73,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --cycle|-c)
             cycle=true
+            use_optimal=false
             shift
             ;;
         *)
@@ -77,6 +82,12 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+
+export DISABLE_BUG_COMMAND=1
+export DISABLE_COST_WARNINGS=1
+export DISABLE_ERROR_REPORTING=1
+export DISABLE_TELEMETRY=1
 
 # Register session start
 c2switcher start-session \
