@@ -4,7 +4,7 @@ Claude Code Account Switcher - Manage multiple Claude Code accounts
 """
 
 import atexit
-import fcntl
+import contextlib
 import json
 import os
 import shutil
@@ -18,6 +18,7 @@ from typing import Optional, Dict, Any, List
 import requests
 import psutil
 import click
+from filelock import FileLock as FileLocker, Timeout as FileLockTimeout
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -29,7 +30,8 @@ err_console = Console(stderr=True)
 # Paths
 C2SWITCHER_DIR = Path.home() / ".c2switcher"
 DB_PATH = C2SWITCHER_DIR / "store.db"
-LOCK_PATH = Path.home() / ".c2switcher.lock"
+LOCK_PATH = C2SWITCHER_DIR / ".lock"
+HEADERS_PATH = C2SWITCHER_DIR / "headers.json"
 CLAUDE_DIR = Path.home() / ".claude"
 CREDENTIALS_PATH = CLAUDE_DIR / ".credentials.json"
 
@@ -39,102 +41,106 @@ _lock_acquired = None  # Stores the FileLock instance if acquired
 
 class FileLock:
     """
-    File-based locking mechanism to prevent concurrent write operations.
-    Uses fcntl.flock() for exclusive locking.
+    Cross-platform file-based locking mechanism to prevent concurrent write operations.
+    Uses filelock library which works on both Windows (msvcrt) and POSIX (fcntl).
     """
 
     def __init__(self, lock_path: Path = LOCK_PATH):
         self.lock_path = lock_path
-        self.lock_file = None
+        self.pid_path = lock_path.with_suffix('.pid')
+        self.lock = FileLocker(str(lock_path), timeout=-1)  # Non-blocking by default
+        self.acquired = False
 
-    def acquire(self, timeout: int = 30):
-        """Acquire exclusive lock, waiting up to timeout seconds"""
-        import time
-
+    def acquire(self, timeout: int = 30, max_retries: int = 300):
+        """Acquire exclusive lock, waiting up to timeout seconds with max retries"""
         start_time = time.time()
         shown_waiting_msg = False
+        retries = 0
 
-        while True:
+        # Ensure lock directory exists with secure permissions
+        self.lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            os.chmod(self.lock_path.parent, 0o700)
+        except OSError:
+            pass
+
+        while retries < max_retries:
             try:
-                # Open lock file (create if doesn't exist)
-                if self.lock_file is None:
-                    self.lock_file = open(self.lock_path, 'w')
+                # Try to acquire lock (non-blocking)
+                self.lock.acquire(timeout=0.001)
+                self.acquired = True
 
-                # Try to acquire exclusive lock (non-blocking)
-                fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-                # Write PID to lock file for debugging
-                self.lock_file.write(str(os.getpid()))
-                self.lock_file.flush()
+                # Write PID to separate file for debugging (after lock is acquired)
+                try:
+                    fd = os.open(self.pid_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    with os.fdopen(fd, 'w') as f:
+                        f.write(f"{os.getpid()}\n")
+                        f.flush()
+                        os.fsync(f.fileno())  # Ensure other processes see PID immediately
+                except OSError:
+                    pass  # Non-critical
 
                 # Successfully acquired
                 if shown_waiting_msg:
-                    console.print("[green]✓ Lock acquired[/green]")
+                    err_console.print("[green]✓ Lock acquired[/green]")
                 return
 
-            except BlockingIOError:
+            except FileLockTimeout:
                 # Lock is held by another process
+                retries += 1
                 elapsed = time.time() - start_time
 
                 if elapsed >= timeout:
-                    # Timeout reached
-                    if self.lock_file:
-                        self.lock_file.close()
-                        self.lock_file = None
-
-                    # Try to read PID from lock file
-                    try:
-                        with open(self.lock_path, 'r') as f:
-                            pid = f.read().strip()
-                            if pid:
-                                console.print(f"[red]Error: Timeout waiting for c2switcher operation (PID: {pid}) to complete[/red]")
-                            else:
-                                console.print("[red]Error: Timeout waiting for c2switcher operation to complete[/red]")
-                    except:
-                        console.print("[red]Error: Timeout waiting for c2switcher operation to complete[/red]")
-
+                    # Timeout reached - try to show which PID holds the lock
+                    pid_info = self._read_pid()
+                    if pid_info:
+                        err_console.print(f"[red]Error: Timeout waiting for c2switcher operation (PID: {pid_info}) to complete[/red]")
+                    else:
+                        err_console.print("[red]Error: Timeout waiting for c2switcher operation to complete[/red]")
                     sys.exit(1)
 
                 # Show waiting message once
                 if not shown_waiting_msg:
-                    try:
-                        with open(self.lock_path, 'r') as f:
-                            pid = f.read().strip()
-                            if pid:
-                                console.print(f"[yellow]Waiting for another c2switcher operation to complete (PID: {pid})...[/yellow]")
-                            else:
-                                console.print("[yellow]Waiting for another c2switcher operation to complete...[/yellow]")
-                    except:
-                        console.print("[yellow]Waiting for another c2switcher operation to complete...[/yellow]")
+                    pid_info = self._read_pid()
+                    if pid_info:
+                        err_console.print(f"[yellow]Waiting for another c2switcher operation to complete (PID: {pid_info})...[/yellow]")
+                    else:
+                        err_console.print("[yellow]Waiting for another c2switcher operation to complete...[/yellow]")
                     shown_waiting_msg = True
 
                 # Wait a bit before retrying
                 time.sleep(0.1)
 
             except Exception as e:
-                if self.lock_file:
-                    self.lock_file.close()
-                    self.lock_file = None
-                console.print(f"[red]Error acquiring lock: {e}[/red]")
+                err_console.print(f"[red]Error acquiring lock: {e}[/red]")
                 sys.exit(1)
+
+        # Max retries exceeded
+        err_console.print(f"[red]Error: Maximum retries ({max_retries}) exceeded waiting for lock[/red]")
+        sys.exit(1)
+
+    def _read_pid(self) -> Optional[str]:
+        """Read PID from lock file for debugging"""
+        try:
+            if self.pid_path.exists():
+                with open(self.pid_path, 'r') as f:
+                    return f.read().strip()
+        except:
+            pass
+        return None
 
     def release(self):
         """Release the lock"""
-        if self.lock_file:
+        if self.acquired:
             try:
-                # Release lock
-                fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_UN)
-                self.lock_file.close()
+                self.lock.release()
+                self.acquired = False
 
-                # Clean up lock file
-                try:
-                    self.lock_path.unlink()
-                except:
-                    pass
-            except:
+                # Clean up PID file
+                with contextlib.suppress(FileNotFoundError, OSError):
+                    self.pid_path.unlink()
+            except Exception:
                 pass
-            finally:
-                self.lock_file = None
 
 
 def acquire_lock():
@@ -196,6 +202,13 @@ def atomic_write_json(path: Path, data: Dict, preserve_permissions: bool = True)
         data: Dictionary to write as JSON
         preserve_permissions: If True, copy permissions from existing file
     """
+    # Ensure parent directory exists with secure permissions
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass  # Best effort
+
     # Query existing permissions if requested
     mode = 0o600  # Default: owner read/write only
     if preserve_permissions and path.exists():
@@ -313,13 +326,17 @@ def is_session_alive(session: Dict) -> bool:
 
 def cleanup_dead_sessions(db: 'Database'):
     """
-    Mark dead sessions as ended.
+    Mark dead sessions as ended and update last_checked for alive sessions.
     Called before any session-aware command to maintain accurate state.
     """
     active_sessions = db.get_active_sessions()
 
     for session in active_sessions:
-        if not is_session_alive(dict(session)):
+        if is_session_alive(dict(session)):
+            # Update last checked timestamp for alive sessions
+            db.update_session_last_checked(session['session_id'])
+        else:
+            # Mark dead sessions as ended
             db.mark_session_ended(session['session_id'])
 
 
@@ -333,8 +350,21 @@ class Database:
 
     def init_db(self):
         """Initialize database schema"""
-        self.conn = sqlite3.connect(str(self.db_path))
+        # Ensure database directory exists with secure permissions
+        C2SWITCHER_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            os.chmod(C2SWITCHER_DIR, 0o700)
+        except OSError:
+            pass  # Best effort
+
+        self.conn = sqlite3.connect(str(self.db_path), timeout=5)
         self.conn.row_factory = sqlite3.Row
+
+        # Set DB file permissions to 0o600 (matches Claude Code's .credentials.json)
+        try:
+            os.chmod(self.db_path, 0o600)
+        except (FileNotFoundError, OSError):
+            pass  # Best effort
 
         # Enable important pragmas
         self.conn.execute("PRAGMA foreign_keys = ON")  # Enforce foreign key constraints
@@ -753,6 +783,47 @@ class Database:
         return False  # Don't suppress exceptions
 
 
+def load_headers_config() -> Dict[str, str]:
+    """
+    Load headers configuration from .c2switcher/headers.json.
+    Creates default configuration if it doesn't exist.
+
+    Returns:
+        Dictionary of header key-value pairs
+    """
+    default_headers = {
+        "accept": "application/json, text/plain, */*",
+        "accept-encoding": "gzip, compress, deflate, br",
+        "anthropic-beta": "oauth-2025-04-20",
+        "content-type": "application/json",
+        "user-agent": "claude-code/2.0.20",
+        "connection": "keep-alive"
+    }
+
+    # Create config directory if it doesn't exist
+    HEADERS_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    # If config file doesn't exist, create it with defaults
+    if not HEADERS_PATH.exists():
+        try:
+            atomic_write_json(HEADERS_PATH, default_headers, preserve_permissions=False)
+        except Exception:
+            # Fall back to defaults if can't write config
+            return default_headers
+
+    # Load configuration
+    try:
+        with open(HEADERS_PATH, 'r') as f:
+            config = json.load(f)
+            # Merge with defaults (config overrides defaults)
+            headers = default_headers.copy()
+            headers.update(config)
+            return headers
+    except Exception:
+        # Fall back to defaults on any error
+        return default_headers
+
+
 class ClaudeAPI:
     """Claude API client for profile and usage endpoints"""
 
@@ -762,16 +833,14 @@ class ClaudeAPI:
 
     @staticmethod
     def _get_headers(token: str) -> Dict[str, str]:
-        """Get common API headers with authorization token"""
-        return {
-            "accept": "application/json, text/plain, */*",
-            "accept-encoding": "gzip, compress, deflate, br",
-            "anthropic-beta": "oauth-2025-04-20",
-            "authorization": f"Bearer {token}",
-            "content-type": "application/json",
-            "user-agent": "claude-code/2.0.20",
-            "connection": "keep-alive",
-        }
+        """
+        Get common API headers with authorization token.
+
+        Loads base headers from .c2switcher/headers.json and adds authorization.
+        """
+        headers = load_headers_config()
+        headers["authorization"] = f"Bearer {token}"
+        return headers
 
     @staticmethod
     def get_profile(token: str) -> Dict:
@@ -837,6 +906,13 @@ class SandboxEnvironment:
         self.temp_claude_dir.mkdir(parents=True, exist_ok=True)
         self.temp_creds_path = self.temp_claude_dir / ".credentials.json"
 
+        # Set secure permissions on sandbox directories
+        try:
+            os.chmod(self.temp_home, 0o700)
+            os.chmod(self.temp_claude_dir, 0o700)
+        except OSError:
+            pass  # Best effort
+
         # Write credentials to sandbox
         atomic_write_json(self.temp_creds_path, self.credentials, preserve_permissions=False)
 
@@ -848,12 +924,18 @@ class SandboxEnvironment:
         if real_claude_json.exists():
             sandbox_claude_json = self.temp_claude_dir / ".claude.json"
             shutil.copy2(real_claude_json, sandbox_claude_json)
+            # Set secure permissions on copied file
+            with contextlib.suppress(FileNotFoundError, PermissionError, OSError):
+                os.chmod(sandbox_claude_json, 0o600)
 
         # Copy settings.json (user preferences like terminal theme)
         real_settings = real_claude_dir / "settings.json"
         if real_settings.exists():
             sandbox_settings = self.temp_claude_dir / "settings.json"
             shutil.copy2(real_settings, sandbox_settings)
+            # Set secure permissions on copied file
+            with contextlib.suppress(FileNotFoundError, PermissionError, OSError):
+                os.chmod(sandbox_settings, 0o600)
 
         # Create environment with sandboxed HOME
         self.env = os.environ.copy()
@@ -872,7 +954,7 @@ class SandboxEnvironment:
                 shutil.rmtree(self.temp_home)
             except Exception as e:
                 # Log warning but don't fail - cleanup is best-effort
-                pass
+                err_console.print(f"[yellow]Warning: Failed to clean up sandbox directory {self.temp_home}: {e}[/yellow]")
 
         return False  # Don't suppress exceptions
 
@@ -887,13 +969,17 @@ class SandboxEnvironment:
             return json.load(f)
 
 
-def refresh_token_via_claude(credentials_json: str, account_uuid: str) -> Dict:
+def refresh_token_via_claude(credentials_json: str, account_uuid: Optional[str] = None) -> Dict:
     """
     Refresh token using a sandboxed per-account HOME directory.
 
     This prevents interfering with any running Claude instances by using
     a temporary directory that won't affect the global ~/.claude/.credentials.json.
     Configuration files are inherited to avoid prompts for terminal theme, etc.
+
+    Args:
+        credentials_json: JSON string of credentials to refresh
+        account_uuid: Account UUID for sandbox directory. If None, uses a bootstrap hash.
     """
     # Parse credentials
     creds = json.loads(credentials_json)
@@ -905,6 +991,12 @@ def refresh_token_via_claude(credentials_json: str, account_uuid: str) -> Dict:
         return creds
 
     console.print("[yellow]Token expired, refreshing via Claude Code...[/yellow]")
+
+    # Use bootstrap UUID if not provided (for initial add)
+    if account_uuid is None:
+        import hashlib
+        creds_hash = hashlib.sha256(credentials_json.encode()).hexdigest()[:16]
+        account_uuid = f"bootstrap-{creds_hash}"
 
     # Use sandboxed environment with automatic cleanup
     sandbox = SandboxEnvironment(account_uuid, creds)
@@ -1155,23 +1247,40 @@ def add(nickname: Optional[str], creds_file: Optional[str]):
             with open(CREDENTIALS_PATH, 'r') as f:
                 credentials = json.load(f)
 
+        # Check if token is expired, refresh first if needed (before get_profile)
+        expires_at = credentials.get("claudeAiOauth", {}).get("expiresAt", 0)
+        if expires_at <= int(time.time() * 1000):
+            # Token expired - refresh with bootstrap UUID before getting profile
+            credentials = refresh_token_via_claude(json.dumps(credentials), account_uuid=None)
+
         # Get access token
         token = credentials.get("claudeAiOauth", {}).get("accessToken")
         if not token:
             console.print("[red]Error: No access token found in credentials[/red]")
             return
 
-        # Get profile first to extract UUID
-        with console.status("[bold green]Fetching account profile..."):
-            profile = ClaudeAPI.get_profile(token)
+        # Get profile to extract UUID
+        try:
+            with err_console.status("[bold green]Fetching account profile..."):
+                profile = ClaudeAPI.get_profile(token)
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 401:
+                # Token invalid or expired - try refreshing again
+                console.print("[yellow]Token rejected, attempting refresh...[/yellow]")
+                credentials = refresh_token_via_claude(json.dumps(credentials), account_uuid=None)
+                token = credentials.get("claudeAiOauth", {}).get("accessToken")
+                with err_console.status("[bold green]Retrying profile fetch..."):
+                    profile = ClaudeAPI.get_profile(token)
+            else:
+                raise
 
-        # Get account UUID for token refresh
+        # Get account UUID for future refreshes
         account_uuid = profile.get("account", {}).get("uuid")
         if not account_uuid:
             console.print("[red]Error: No account UUID in profile[/red]")
             return
 
-        # Refresh token if needed (using per-account temp dir)
+        # Final refresh with real UUID to update sandbox directory
         credentials = refresh_token_via_claude(json.dumps(credentials), account_uuid)
 
         # Add to database
@@ -1278,7 +1387,7 @@ def usage(output_json: bool, force: bool):
         for acc in accounts:
             try:
                 display_name = acc['nickname'] or acc['email']
-                with console.status(f"[bold green]Fetching usage for {display_name}..."):
+                with err_console.status(f"[bold green]Fetching usage for {display_name}..."):
                     usage = get_account_usage(db, acc["uuid"], acc["credentials_json"], force=force)
 
                 usage_data.append({
@@ -1410,8 +1519,9 @@ def usage(output_json: bool, force: bool):
 @click.option("--session-id", help="Session ID for load balancing and sticky assignment")
 def optimal(switch: bool, session_id: Optional[str]):
     """Find the optimal account with load balancing and session stickiness"""
-    if switch:
-        acquire_lock()  # Lock before writing .credentials.json
+    # Lock if switching credentials OR if assigning a session (DB write)
+    if switch or session_id:
+        acquire_lock()
 
     db = Database()
 
@@ -1523,12 +1633,15 @@ def cycle():
             return
 
         # Read current credentials to find current account
+        # NOTE: Matching by accessToken can break after token refresh since the token changes.
+        # A more robust approach would be to persist the currently selected account UUID
+        # in a separate sidecar file (e.g., ~/.claude/.c2switcher-current.json).
         current_uuid = None
         if CREDENTIALS_PATH.exists():
             with open(CREDENTIALS_PATH, 'r') as f:
                 try:
                     current_creds = json.load(f)
-                    # Try to find UUID in credentials
+                    # Try to find UUID by comparing access tokens
                     cursor = db.conn.cursor()
                     for acc in accounts:
                         acc_creds = json.loads(acc["credentials_json"])
