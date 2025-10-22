@@ -183,8 +183,8 @@ def mask_email(email: str) -> str:
 
 def is_session_alive(session: Dict) -> bool:
     """
-    Multi-factor liveness check to determine if a session is still active.
-    Prevents false positives from PID reuse.
+    Multi-factor liveness check using process fingerprinting.
+    Verifies PID, create_time, and exe path to prevent false positives from PID reuse.
     """
     import os
     debug = os.environ.get('DEBUG_SESSIONS') == '1'
@@ -197,41 +197,30 @@ def is_session_alive(session: Dict) -> bool:
             if debug: print(f"[DEBUG] PID {session['pid']}: not running")
             return False
 
-        # Check 2: Command line contains 'claude'
-        cmdline = ' '.join(proc.cmdline()).lower()
-        if 'claude' not in cmdline:
-            if debug: print(f"[DEBUG] PID {session['pid']}: cmdline '{cmdline}' doesn't contain 'claude'")
-            return False
+        # Check 2: Verify process start time matches (prevents PID reuse)
+        if session.get('proc_start_time'):
+            proc_start_time = proc.create_time()
+            stored_start_time = session['proc_start_time']
 
-        # Check 3: Process start time should be before session creation
-        # This prevents PID reuse false positives
-        proc_start = datetime.fromtimestamp(proc.create_time())
+            # Allow 1 second tolerance for floating point comparison
+            if abs(proc_start_time - stored_start_time) >= 1.0:
+                if debug:
+                    print(f"[DEBUG] PID {session['pid']}: start time mismatch "
+                          f"(proc={proc_start_time}, stored={stored_start_time})")
+                return False
 
-        # Parse session created_at (could be datetime or string)
-        # SQLite CURRENT_TIMESTAMP returns UTC, need to convert to local time
-        if isinstance(session['created_at'], str):
-            # Parse as UTC and convert to local time
-            from datetime import timezone
-            session_start_utc = datetime.fromisoformat(session['created_at'].replace('Z', '+00:00'))
-            if session_start_utc.tzinfo is None:
-                # Naive datetime from SQLite - treat as UTC
-                session_start_utc = session_start_utc.replace(tzinfo=timezone.utc)
-            session_start = session_start_utc.astimezone().replace(tzinfo=None)
-        else:
-            session_start = session['created_at']
-
-        # Process must have started before session was created (or shortly after due to clock skew)
-        # Allow up to 30 seconds for wrapper startup time before session registration
-        time_diff = (session_start - proc_start).total_seconds()
-        if debug:
-            print(f"[DEBUG] PID {session['pid']}: proc_start={proc_start}, session_start={session_start}, diff={time_diff}s")
-
-        if time_diff < -2:  # Session created >2s before process started (impossible/clock skew)
-            if debug: print(f"[DEBUG] PID {session['pid']}: time_diff {time_diff} < -2 (session created before process)")
-            return False
-        if time_diff > 30:  # Session created >30s after process started (likely PID reuse)
-            if debug: print(f"[DEBUG] PID {session['pid']}: time_diff {time_diff} > 30 (too old)")
-            return False
+        # Check 3: Verify executable path matches (optional, may not always be accessible)
+        if session.get('exe'):
+            try:
+                proc_exe = proc.exe()
+                if proc_exe != session['exe']:
+                    if debug:
+                        print(f"[DEBUG] PID {session['pid']}: exe mismatch "
+                              f"(proc={proc_exe}, stored={session['exe']})")
+                    return False
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                # Can't access exe, skip this check
+                pass
 
         if debug: print(f"[DEBUG] PID {session['pid']}: ALIVE ✓")
         return True
@@ -266,8 +255,9 @@ class Database:
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
 
-        # Enable WAL mode for better concurrency
-        self.conn.execute("PRAGMA journal_mode=WAL")
+        # Enable important pragmas
+        self.conn.execute("PRAGMA foreign_keys = ON")  # Enforce foreign key constraints
+        self.conn.execute("PRAGMA journal_mode=WAL")  # WAL mode for better concurrency
         self.conn.execute("PRAGMA busy_timeout=5000")  # Wait up to 5s for locks
 
         cursor = self.conn.cursor()
@@ -312,9 +302,9 @@ class Database:
             )
         """)
 
-        # Index for faster queries
+        # Indexes for usage queries (optimized for ORDER BY queried_at DESC)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_usage_account_time
+            CREATE INDEX IF NOT EXISTS idx_usage_account_queried
             ON usage_history(account_uuid, queried_at DESC)
         """)
 
@@ -325,19 +315,23 @@ class Database:
                 account_uuid TEXT,
                 pid INTEGER NOT NULL,
                 parent_pid INTEGER,
+                proc_start_time REAL,
+                exe TEXT,
                 cmdline TEXT,
                 cwd TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_checked_alive TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 ended_at TIMESTAMP,
-                FOREIGN KEY (account_uuid) REFERENCES accounts(uuid)
+                FOREIGN KEY (account_uuid) REFERENCES accounts(uuid) ON DELETE SET NULL
             )
         """)
 
         # Indexes for session queries
+        # Composite index for active sessions with ORDER BY created_at DESC
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_sessions_active
-            ON sessions(ended_at) WHERE ended_at IS NULL
+            CREATE INDEX IF NOT EXISTS idx_sessions_active_created
+            ON sessions(created_at DESC)
+            WHERE ended_at IS NULL
         """)
 
         cursor.execute("""
@@ -529,13 +523,13 @@ class Database:
         return result
 
     def create_session(self, session_id: str, pid: int, parent_pid: Optional[int],
-                      cmdline: str, cwd: str):
-        """Create a new session record"""
+                      proc_start_time: float, exe: str, cmdline: str, cwd: str):
+        """Create a new session record with process fingerprinting"""
         cursor = self.conn.cursor()
         cursor.execute("""
-            INSERT INTO sessions (session_id, pid, parent_pid, cmdline, cwd)
-            VALUES (?, ?, ?, ?, ?)
-        """, (session_id, pid, parent_pid, cmdline, cwd))
+            INSERT INTO sessions (session_id, pid, parent_pid, proc_start_time, exe, cmdline, cwd)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (session_id, pid, parent_pid, proc_start_time, exe, cmdline, cwd))
         self.conn.commit()
 
     def get_session(self, session_id: str) -> Optional[sqlite3.Row]:
@@ -668,11 +662,22 @@ class Database:
         if self.conn:
             self.conn.close()
 
+    def __enter__(self):
+        """Context manager entry"""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - automatically close connection"""
+        self.close()
+        return False  # Don't suppress exceptions
+
 
 class ClaudeAPI:
     """Claude API client for profile and usage endpoints"""
 
     BASE_URL = "https://api.anthropic.com/api/oauth"
+    # Timeout: (connect timeout, read timeout) in seconds
+    TIMEOUT = (5, 20)
 
     @staticmethod
     def _get_headers(token: str) -> Dict[str, str]:
@@ -685,7 +690,6 @@ class ClaudeAPI:
             "content-type": "application/json",
             "user-agent": "claude-code/2.0.20",
             "connection": "keep-alive",
-            "host": "api.anthropic.com",
         }
 
     @staticmethod
@@ -693,7 +697,8 @@ class ClaudeAPI:
         """Get profile information"""
         response = requests.get(
             f"{ClaudeAPI.BASE_URL}/profile",
-            headers=ClaudeAPI._get_headers(token)
+            headers=ClaudeAPI._get_headers(token),
+            timeout=ClaudeAPI.TIMEOUT
         )
         response.raise_for_status()
         return response.json()
@@ -703,14 +708,20 @@ class ClaudeAPI:
         """Get usage information"""
         response = requests.get(
             f"{ClaudeAPI.BASE_URL}/usage",
-            headers=ClaudeAPI._get_headers(token)
+            headers=ClaudeAPI._get_headers(token),
+            timeout=ClaudeAPI.TIMEOUT
         )
         response.raise_for_status()
         return response.json()
 
 
-def refresh_token_via_claude(credentials_json: str) -> Dict:
-    """Refresh token by writing credentials and running claude code"""
+def refresh_token_via_claude(credentials_json: str, account_uuid: str) -> Dict:
+    """
+    Refresh token using a sandboxed per-account HOME directory.
+
+    This prevents interfering with any running Claude instances by using
+    a temporary directory that won't affect the global ~/.claude/.credentials.json
+    """
     # Parse credentials
     creds = json.loads(credentials_json)
 
@@ -720,12 +731,21 @@ def refresh_token_via_claude(credentials_json: str) -> Dict:
         # Token not expired
         return creds
 
-    # Write credentials to file
-    CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(CREDENTIALS_PATH, 'w') as f:
+    console.print("[yellow]Token expired, refreshing via Claude Code...[/yellow]")
+
+    # Create per-account temporary directory
+    temp_home = Path.home() / ".c2switcher" / "tmp" / account_uuid
+    temp_claude_dir = temp_home / ".claude"
+    temp_claude_dir.mkdir(parents=True, exist_ok=True)
+    temp_creds_path = temp_claude_dir / ".credentials.json"
+
+    # Write credentials to temp location
+    with open(temp_creds_path, 'w') as f:
         json.dump(creds, f)
 
-    console.print("[yellow]Token expired, refreshing via Claude Code...[/yellow]")
+    # Set up environment with sandboxed HOME
+    env = os.environ.copy()
+    env["HOME"] = str(temp_home.resolve())
 
     # Try /status command first (doesn't consume usage)
     try:
@@ -733,11 +753,12 @@ def refresh_token_via_claude(credentials_json: str) -> Dict:
             ["claude", "-p", "/status", "--verbose", "--output-format=json"],
             timeout=30,
             capture_output=True,
-            check=False
+            check=False,
+            env=env
         )
 
         # Read credentials to check if token was refreshed
-        with open(CREDENTIALS_PATH, 'r') as f:
+        with open(temp_creds_path, 'r') as f:
             refreshed_creds = json.load(f)
 
         # Check if token was actually refreshed
@@ -758,7 +779,8 @@ def refresh_token_via_claude(credentials_json: str) -> Dict:
             ["claude", "-p", "hi", "--model", "haiku"],
             timeout=30,
             capture_output=True,
-            check=False
+            check=False,
+            env=env
         )
     except subprocess.TimeoutExpired:
         pass
@@ -767,7 +789,7 @@ def refresh_token_via_claude(credentials_json: str) -> Dict:
         raise
 
     # Read refreshed credentials
-    with open(CREDENTIALS_PATH, 'r') as f:
+    with open(temp_creds_path, 'r') as f:
         refreshed_creds = json.load(f)
 
     return refreshed_creds
@@ -782,7 +804,7 @@ def get_account_usage(db: Database, account_uuid: str, credentials_json: str, fo
             return cached
 
     # Refresh token if needed
-    refreshed_creds = refresh_token_via_claude(credentials_json)
+    refreshed_creds = refresh_token_via_claude(credentials_json, account_uuid)
     token = refreshed_creds.get("claudeAiOauth", {}).get("accessToken")
 
     if not token:
@@ -963,13 +985,18 @@ def add(nickname: Optional[str], creds_file: Optional[str]):
             console.print("[red]Error: No access token found in credentials[/red]")
             return
 
-        # Refresh if needed
-        credentials = refresh_token_via_claude(json.dumps(credentials))
-        token = credentials.get("claudeAiOauth", {}).get("accessToken")
-
-        # Get profile
+        # Get profile first to extract UUID
         with console.status("[bold green]Fetching account profile..."):
             profile = ClaudeAPI.get_profile(token)
+
+        # Get account UUID for token refresh
+        account_uuid = profile.get("account", {}).get("uuid")
+        if not account_uuid:
+            console.print("[red]Error: No account UUID in profile[/red]")
+            return
+
+        # Refresh token if needed (using per-account temp dir)
+        credentials = refresh_token_via_claude(json.dumps(credentials), account_uuid)
 
         # Add to database
         index = db.add_account(profile, credentials, nickname)
@@ -1431,17 +1458,26 @@ def start_session(session_id: str, pid: int, parent_pid: Optional[int], cwd: str
     db = Database()
 
     try:
-        # Get command line for the process
+        # Get process fingerprinting data
         try:
             proc = psutil.Process(pid)
             cmdline = ' '.join(proc.cmdline())
+            proc_start_time = proc.create_time()
+            try:
+                exe = proc.exe()
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                exe = "unknown"
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             cmdline = "unknown"
+            proc_start_time = 0.0
+            exe = "unknown"
 
         db.create_session(
             session_id=session_id,
             pid=pid,
             parent_pid=parent_pid,
+            proc_start_time=proc_start_time,
+            exe=exe,
             cmdline=cmdline,
             cwd=cwd
         )
