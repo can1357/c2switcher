@@ -8,6 +8,8 @@ import json
 import sqlite3
 import subprocess
 import time
+import fcntl
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -23,8 +25,144 @@ console = Console()
 
 # Paths
 DB_PATH = Path.home() / ".c2switcher.db"
+LOCK_PATH = Path.home() / ".c2switcher.lock"
 CLAUDE_DIR = Path.home() / ".claude"
 CREDENTIALS_PATH = CLAUDE_DIR / ".credentials.json"
+
+# Global lock state
+_lock_acquired = None  # Stores the FileLock instance if acquired
+
+
+class FileLock:
+    """
+    File-based locking mechanism to prevent concurrent write operations.
+    Uses fcntl.flock() for exclusive locking.
+    """
+
+    def __init__(self, lock_path: Path = LOCK_PATH):
+        self.lock_path = lock_path
+        self.lock_file = None
+
+    def acquire(self, timeout: int = 30):
+        """Acquire exclusive lock, waiting up to timeout seconds"""
+        import time
+
+        start_time = time.time()
+        shown_waiting_msg = False
+
+        while True:
+            try:
+                # Open lock file (create if doesn't exist)
+                if self.lock_file is None:
+                    self.lock_file = open(self.lock_path, 'w')
+
+                # Try to acquire exclusive lock (non-blocking)
+                fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+                # Write PID to lock file for debugging
+                self.lock_file.write(str(os.getpid()))
+                self.lock_file.flush()
+
+                # Successfully acquired
+                if shown_waiting_msg:
+                    console.print("[green]✓ Lock acquired[/green]")
+                return
+
+            except BlockingIOError:
+                # Lock is held by another process
+                elapsed = time.time() - start_time
+
+                if elapsed >= timeout:
+                    # Timeout reached
+                    if self.lock_file:
+                        self.lock_file.close()
+                        self.lock_file = None
+
+                    # Try to read PID from lock file
+                    try:
+                        with open(self.lock_path, 'r') as f:
+                            pid = f.read().strip()
+                            if pid:
+                                console.print(f"[red]Error: Timeout waiting for c2switcher operation (PID: {pid}) to complete[/red]")
+                            else:
+                                console.print("[red]Error: Timeout waiting for c2switcher operation to complete[/red]")
+                    except:
+                        console.print("[red]Error: Timeout waiting for c2switcher operation to complete[/red]")
+
+                    sys.exit(1)
+
+                # Show waiting message once
+                if not shown_waiting_msg:
+                    try:
+                        with open(self.lock_path, 'r') as f:
+                            pid = f.read().strip()
+                            if pid:
+                                console.print(f"[yellow]Waiting for another c2switcher operation to complete (PID: {pid})...[/yellow]")
+                            else:
+                                console.print("[yellow]Waiting for another c2switcher operation to complete...[/yellow]")
+                    except:
+                        console.print("[yellow]Waiting for another c2switcher operation to complete...[/yellow]")
+                    shown_waiting_msg = True
+
+                # Wait a bit before retrying
+                time.sleep(0.1)
+
+            except Exception as e:
+                if self.lock_file:
+                self.lock_file.close()
+                self.lock_file = None
+            console.print(f"[red]Error acquiring lock: {e}[/red]")
+            sys.exit(1)
+
+    def release(self):
+        """Release the lock"""
+        if self.lock_file:
+            try:
+                # Release lock
+                fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_UN)
+                self.lock_file.close()
+
+                # Clean up lock file
+                try:
+                    self.lock_path.unlink()
+                except:
+                    pass
+            except:
+                pass
+            finally:
+                self.lock_file = None
+
+
+def acquire_lock():
+    """
+    Acquire an exclusive file lock to prevent concurrent write operations.
+    Idempotent - can be called multiple times, will only acquire once.
+
+    Read operations don't need locks - SQLite with WAL mode handles concurrent reads.
+    Lock is needed for: writing .credentials.json, complex read-modify-write operations.
+    """
+    global _lock_acquired
+
+    # If already acquired, do nothing (idempotent)
+    if _lock_acquired is not None:
+        return
+
+    # Create and acquire lock
+    lock = FileLock()
+    lock.acquire()
+    _lock_acquired = lock
+
+    # Register cleanup on exit
+    import atexit
+    atexit.register(_release_lock)
+
+
+def _release_lock():
+    """Internal function to release the global lock on exit"""
+    global _lock_acquired
+    if _lock_acquired is not None:
+        _lock_acquired.release()
+        _lock_acquired = None
 
 
 def mask_email(email: str) -> str:
@@ -127,6 +265,10 @@ class Database:
         """Initialize database schema"""
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
+
+        # Enable WAL mode for better concurrency
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=5000")  # Wait up to 5s for locks
 
         cursor = self.conn.cursor()
 
@@ -799,6 +941,7 @@ def cli():
 @click.option("--creds-file", "-f", type=click.Path(exists=True), help="Path to credentials JSON file")
 def add(nickname: Optional[str], creds_file: Optional[str]):
     """Add a new account from credentials file or current .credentials.json"""
+    acquire_lock()  # Lock for database write
     db = Database()
 
     try:
@@ -909,6 +1052,7 @@ def list_accounts_cmd(output_json: bool):
 @click.option("--force", is_flag=True, help="Force refresh (ignore cache)")
 def usage(output_json: bool, force: bool):
     """List usage across all accounts with session distribution"""
+    acquire_lock()  # Lock for read-modify-write (fetch API + write DB)
     db = Database()
 
     try:
@@ -1071,6 +1215,9 @@ def usage(output_json: bool, force: bool):
 @click.option("--session-id", help="Session ID for load balancing and sticky assignment")
 def optimal(switch: bool, session_id: Optional[str]):
     """Find the optimal account with load balancing and session stickiness"""
+    if switch:
+        acquire_lock()  # Lock before writing .credentials.json
+
     db = Database()
 
     try:
@@ -1135,6 +1282,7 @@ def optimal(switch: bool, session_id: Optional[str]):
 @click.argument("identifier")
 def switch(identifier: str):
     """Switch to a specific account by index, nickname, email, or UUID"""
+    acquire_lock()  # Lock before writing .credentials.json
     db = Database()
 
     try:
@@ -1167,6 +1315,7 @@ def switch(identifier: str):
 @cli.command()
 def cycle():
     """Cycle to the next account in the list"""
+    acquire_lock()  # Lock before writing .credentials.json
     db = Database()
 
     try:
@@ -1278,6 +1427,7 @@ def use(identifier: str):
 @click.option("--cwd", required=True, help="Current working directory")
 def start_session(session_id: str, pid: int, parent_pid: Optional[int], cwd: str):
     """Register a new Claude session"""
+    acquire_lock()  # Lock for database write
     db = Database()
 
     try:
@@ -1308,6 +1458,7 @@ def start_session(session_id: str, pid: int, parent_pid: Optional[int], cwd: str
 @click.option("--session-id", required=True, help="Session identifier to end")
 def end_session(session_id: str):
     """Mark a Claude session as ended"""
+    acquire_lock()  # Lock for database write
     db = Database()
 
     try:
