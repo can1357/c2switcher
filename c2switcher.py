@@ -5,6 +5,7 @@ Claude Code Account Switcher - Manage multiple Claude Code accounts
 
 import atexit
 import contextlib
+import copy
 import json
 import os
 import random
@@ -1027,7 +1028,7 @@ class SandboxEnvironment:
             return self.credentials
 
 
-def refresh_token_via_claude(credentials_json: str, account_uuid: Optional[str] = None, account_info: Optional[Dict] = None) -> Dict:
+def refresh_token_via_claude(credentials_json: str, account_uuid: Optional[str] = None, account_info: Optional[Dict] = None, force: bool = False) -> Dict:
     """
     Refresh token using a sandboxed per-account HOME directory.
 
@@ -1039,17 +1040,24 @@ def refresh_token_via_claude(credentials_json: str, account_uuid: Optional[str] 
         credentials_json: JSON string of credentials to refresh
         account_uuid: Account UUID for sandbox directory. If None, uses a bootstrap hash.
         account_info: Optional account metadata (email, org_uuid, etc.) for .claude.json patching
+        force: If True, force refresh regardless of expiry time
     """
     # Parse credentials
     creds = json.loads(credentials_json)
 
-    # Check if token is expired
+    # Check if token is still valid (with 10 minute buffer)
     expires_at = creds.get("claudeAiOauth", {}).get("expiresAt", 0)
-    if expires_at > int(time.time() * 1000):
-        # Token not expired
+    if not force and expires_at - 600000 > int(time.time() * 1000):
+        # Token not expired, return as-is
         return creds
 
-    console.print("[yellow]Token expired, refreshing via Claude Code...[/yellow]")
+    # Store original expiry for comparison later
+    console.print("[yellow]Refreshing token via Claude Code...[/yellow]")
+
+    # Make a copy and fake the expiry to force Claude Code to refresh
+    creds_to_refresh = copy.deepcopy(creds)
+    fake_expiry = int(time.time() * 1000) + 60000  # 60 seconds from now
+    creds_to_refresh["claudeAiOauth"]["expiresAt"] = fake_expiry
 
     # Use bootstrap UUID if not provided (for initial add)
     if account_uuid is None:
@@ -1058,7 +1066,8 @@ def refresh_token_via_claude(credentials_json: str, account_uuid: Optional[str] 
         account_uuid = f"bootstrap-{creds_hash}"
 
     # Use sandboxed environment with automatic cleanup
-    sandbox = SandboxEnvironment(account_uuid, creds, account_info)
+    # Pass credentials (possibly with faked expiry if force=True)
+    sandbox = SandboxEnvironment(account_uuid, creds_to_refresh, account_info)
     with sandbox as env:
         # 10% chance to skip /status and go directly to fallback
         use_fallback = random.random() < 0.1
@@ -1143,7 +1152,7 @@ def get_account_usage(db: Database, account_uuid: str, credentials_json: str, fo
             "org_name": row[5]
         }
 
-    # Refresh token if needed
+    # Refresh token if needed (refresh_token_via_claude checks expiry internally)
     refreshed_creds = refresh_token_via_claude(credentials_json, account_uuid, account_info)
     token = refreshed_creds.get("claudeAiOauth", {}).get("accessToken")
 
