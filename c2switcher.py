@@ -1028,31 +1028,64 @@ class SandboxEnvironment:
             return self.credentials
 
 
-def refresh_token_via_claude(credentials_json: str, account_uuid: Optional[str] = None, account_info: Optional[Dict] = None, force: bool = False) -> Dict:
+def refresh_token_direct(credentials_json: str) -> Optional[Dict]:
     """
-    Refresh token using a sandboxed per-account HOME directory.
+    Refresh token directly using Anthropic's OAuth endpoint.
+
+    Args:
+        credentials_json: JSON string of credentials containing refresh token
+
+    Returns:
+        Updated credentials dict with new tokens, or None if refresh failed
+    """
+    creds = json.loads(credentials_json)
+    oauth = creds.get("claudeAiOauth", {})
+    refresh_token = oauth.get("refreshToken")
+
+    if not refresh_token:
+        return None
+
+    try:
+        response = requests.post(
+            "https://console.anthropic.com/v1/oauth/token",
+            json={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+            },
+            timeout=10
+        )
+
+        if response.status_code == 200:
+            token_data = response.json()
+
+            # Update credentials with new tokens
+            new_creds = copy.deepcopy(creds)
+            new_creds["claudeAiOauth"]["accessToken"] = token_data["access_token"]
+            new_creds["claudeAiOauth"]["refreshToken"] = token_data.get("refresh_token", refresh_token)
+            new_creds["claudeAiOauth"]["expiresAt"] = int(time.time() * 1000) + (token_data.get("expires_in", 3600) * 1000)
+
+            return new_creds
+        else:
+            console.print(f"[yellow]Direct token refresh failed: {response.status_code}[/yellow]")
+            return None
+
+    except Exception as e:
+        console.print(f"[yellow]Direct token refresh error: {e}[/yellow]")
+        return None
+
+
+def _refresh_token_sandbox(credentials_json: str, account_uuid: Optional[str] = None, account_info: Optional[Dict] = None) -> Dict:
+    """
+    Internal function: Refresh token using a sandboxed per-account HOME directory.
 
     This prevents interfering with any running Claude instances by using
     a temporary directory that won't affect the global ~/.claude/.credentials.json.
-    Configuration files are inherited to avoid prompts for terminal theme, etc.
-
-    Args:
-        credentials_json: JSON string of credentials to refresh
-        account_uuid: Account UUID for sandbox directory. If None, uses a bootstrap hash.
-        account_info: Optional account metadata (email, org_uuid, etc.) for .claude.json patching
-        force: If True, force refresh regardless of expiry time
     """
-    # Parse credentials
     creds = json.loads(credentials_json)
 
-    # Check if token is still valid (with 10 minute buffer)
-    expires_at = creds.get("claudeAiOauth", {}).get("expiresAt", 0)
-    if not force and expires_at - 600000 > int(time.time() * 1000):
-        # Token not expired, return as-is
-        return creds
-
     # Store original expiry for comparison later
-    console.print("[yellow]Refreshing token via Claude Code...[/yellow]")
+    expires_at = creds.get("claudeAiOauth", {}).get("expiresAt", 0)
 
     # Make a copy and fake the expiry to force Claude Code to refresh
     creds_to_refresh = copy.deepcopy(creds)
@@ -1129,11 +1162,49 @@ def refresh_token_via_claude(credentials_json: str, account_uuid: Optional[str] 
         return refreshed_creds
 
 
+def refresh_token(credentials_json: str, account_uuid: Optional[str] = None, account_info: Optional[Dict] = None, force: bool = False) -> Dict:
+    """
+    Centralized token refresh function.
+
+    Checks if token is still valid (within 10 minute buffer), and if not:
+    1. Tries direct OAuth refresh first (fast)
+    2. Falls back to Claude Code sandbox method if direct fails
+
+    Args:
+        credentials_json: JSON string of credentials to refresh
+        account_uuid: Account UUID for sandbox directory. If None, uses a bootstrap hash.
+        account_info: Optional account metadata (email, org_uuid, etc.) for .claude.json patching
+        force: If True, force refresh regardless of expiry time
+
+    Returns:
+        Updated credentials dict with fresh tokens
+    """
+    # Parse credentials
+    creds = json.loads(credentials_json)
+
+    # Check if token is still valid (with 10 minute buffer)
+    expires_at = creds.get("claudeAiOauth", {}).get("expiresAt", 0)
+    if not force and expires_at - 600000 > int(time.time() * 1000):
+        # Token not expired, return as-is
+        return creds
+
+    # Try direct OAuth token refresh first (faster and cleaner)
+    console.print("[yellow]Refreshing token...[/yellow]")
+    refreshed = refresh_token_direct(credentials_json)
+    if refreshed:
+        console.print("[green]Token refreshed successfully[/green]")
+        return refreshed
+
+    # Fallback to sandbox method if direct refresh fails
+    console.print("[yellow]Direct refresh failed, using Claude Code sandbox method...[/yellow]")
+    return _refresh_token_sandbox(credentials_json, account_uuid, account_info)
+
+
 def get_account_usage(db: Database, account_uuid: str, credentials_json: str, force: bool = False) -> Dict:
     """Get usage for an account, using cache if available"""
-    # Check cache first
+    # Check cache first (5 minute cache to reduce API calls and token refreshes)
     if not force:
-        cached = db.get_recent_usage(account_uuid, max_age_seconds=30)
+        cached = db.get_recent_usage(account_uuid, max_age_seconds=300)
         if cached:
             return cached
 
@@ -1152,8 +1223,8 @@ def get_account_usage(db: Database, account_uuid: str, credentials_json: str, fo
             "org_name": row[5]
         }
 
-    # Refresh token if needed (refresh_token_via_claude checks expiry internally)
-    refreshed_creds = refresh_token_via_claude(credentials_json, account_uuid, account_info)
+    # Refresh token if needed (refresh_token checks expiry internally)
+    refreshed_creds = refresh_token(credentials_json, account_uuid, account_info)
     token = refreshed_creds.get("claudeAiOauth", {}).get("accessToken")
 
     if not token:
@@ -1338,7 +1409,7 @@ def add(nickname: Optional[str], creds_file: Optional[str]):
         expires_at = credentials.get("claudeAiOauth", {}).get("expiresAt", 0)
         if expires_at <= int(time.time() * 1000):
             # Token expired - refresh with bootstrap UUID before getting profile
-            credentials = refresh_token_via_claude(json.dumps(credentials), account_uuid=None)
+            credentials = refresh_token(json.dumps(credentials), account_uuid=None)
 
         # Get access token
         token = credentials.get("claudeAiOauth", {}).get("accessToken")
@@ -1354,7 +1425,7 @@ def add(nickname: Optional[str], creds_file: Optional[str]):
             if e.response.status_code == 401:
                 # Token invalid or expired - try refreshing again
                 console.print("[yellow]Token rejected, attempting refresh...[/yellow]")
-                credentials = refresh_token_via_claude(json.dumps(credentials), account_uuid=None)
+                credentials = refresh_token(json.dumps(credentials), account_uuid=None)
                 token = credentials.get("claudeAiOauth", {}).get("accessToken")
                 with err_console.status("[bold green]Retrying profile fetch..."):
                     profile = ClaudeAPI.get_profile(token)
@@ -1368,7 +1439,7 @@ def add(nickname: Optional[str], creds_file: Optional[str]):
             return
 
         # Final refresh with real UUID to update sandbox directory
-        credentials = refresh_token_via_claude(json.dumps(credentials), account_uuid)
+        credentials = refresh_token(json.dumps(credentials), account_uuid)
 
         # Add to database
         index = db.add_account(profile, credentials, nickname)
@@ -1698,6 +1769,98 @@ def switch(identifier: str):
             border_style="green"
         ))
 
+    finally:
+        db.close()
+
+
+@cli.command(name="force-refresh")
+@click.argument("identifier", required=False)
+def force_refresh(identifier: Optional[str]):
+    """Force refresh tokens for an account (or all accounts if none specified)"""
+    db = Database()
+
+    try:
+        if identifier:
+            # Refresh specific account
+            account = db.get_account_by_identifier(identifier)
+            if not account:
+                console.print(f"[red]Account not found: {identifier}[/red]")
+                return
+
+            accounts_to_refresh = [account]
+        else:
+            # Refresh all accounts
+            cursor = db.conn.cursor()
+            cursor.execute("""
+                SELECT uuid, email, nickname, credentials_json, index_num, org_uuid, display_name, billing_type, org_name
+                FROM accounts
+                ORDER BY index_num
+            """)
+            rows = cursor.fetchall()
+            accounts_to_refresh = [
+                {
+                    'uuid': row[0],
+                    'email': row[1],
+                    'nickname': row[2],
+                    'credentials_json': row[3],
+                    'index_num': row[4],
+                    'org_uuid': row[5],
+                    'display_name': row[6],
+                    'billing_type': row[7],
+                    'org_name': row[8]
+                }
+                for row in rows
+            ]
+
+        if not accounts_to_refresh:
+            console.print("[yellow]No accounts to refresh[/yellow]")
+            return
+
+        console.print(f"[yellow]Force refreshing {len(accounts_to_refresh)} account(s)...[/yellow]\n")
+
+        for account in accounts_to_refresh:
+            account_display = f"[{account['index_num']}] {account['nickname'] or account['email']}"
+
+            try:
+                # Fetch account info for sandbox
+                account_info = {
+                    "uuid": account['uuid'],
+                    "email": account['email'],
+                    "org_uuid": account['org_uuid'],
+                    "display_name": account['display_name'],
+                    "billing_type": account['billing_type'],
+                    "org_name": account['org_name']
+                }
+
+                # Force refresh the token
+                refreshed_creds = refresh_token(
+                    account['credentials_json'],
+                    account['uuid'],
+                    account_info,
+                    force=True
+                )
+
+                # Update database
+                cursor = db.conn.cursor()
+                cursor.execute(
+                    "UPDATE accounts SET credentials_json = ?, updated_at = CURRENT_TIMESTAMP WHERE uuid = ?",
+                    (json.dumps(refreshed_creds), account['uuid'])
+                )
+                db.conn.commit()
+
+                # Check expiry
+                expires_at = refreshed_creds.get("claudeAiOauth", {}).get("expiresAt", 0)
+                expires_in_hours = (expires_at - int(time.time() * 1000)) / 1000 / 3600
+
+                console.print(f"[green]✓[/green] {account_display} - expires in {expires_in_hours:.1f}h")
+
+            except Exception as e:
+                console.print(f"[red]✗[/red] {account_display} - Error: {e}")
+
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        import traceback
+        traceback.print_exc()
     finally:
         db.close()
 
