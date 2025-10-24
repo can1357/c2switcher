@@ -26,8 +26,7 @@ from rich.table import Table
 from rich.panel import Panel
 from rich import box
 
-console = Console()
-err_console = Console(stderr=True)
+console = Console(stderr=True)
 
 # Paths
 C2SWITCHER_DIR = Path.home() / ".c2switcher"
@@ -84,7 +83,7 @@ class FileLock:
 
                 # Successfully acquired
                 if shown_waiting_msg:
-                    err_console.print("[green]✓ Lock acquired[/green]")
+                    console.print("[green]✓ Lock acquired[/green]")
                 return
 
             except FileLockTimeout:
@@ -96,29 +95,29 @@ class FileLock:
                     # Timeout reached - try to show which PID holds the lock
                     pid_info = self._read_pid()
                     if pid_info:
-                        err_console.print(f"[red]Error: Timeout waiting for c2switcher operation (PID: {pid_info}) to complete[/red]")
+                        console.print(f"[red]Error: Timeout waiting for c2switcher operation (PID: {pid_info}) to complete[/red]")
                     else:
-                        err_console.print("[red]Error: Timeout waiting for c2switcher operation to complete[/red]")
+                        console.print("[red]Error: Timeout waiting for c2switcher operation to complete[/red]")
                     sys.exit(1)
 
                 # Show waiting message once
                 if not shown_waiting_msg:
                     pid_info = self._read_pid()
                     if pid_info:
-                        err_console.print(f"[yellow]Waiting for another c2switcher operation to complete (PID: {pid_info})...[/yellow]")
+                        console.print(f"[yellow]Waiting for another c2switcher operation to complete (PID: {pid_info})...[/yellow]")
                     else:
-                        err_console.print("[yellow]Waiting for another c2switcher operation to complete...[/yellow]")
+                        console.print("[yellow]Waiting for another c2switcher operation to complete...[/yellow]")
                     shown_waiting_msg = True
 
                 # Wait a bit before retrying
                 time.sleep(0.1)
 
             except Exception as e:
-                err_console.print(f"[red]Error acquiring lock: {e}[/red]")
+                console.print(f"[red]Error acquiring lock: {e}[/red]")
                 sys.exit(1)
 
         # Max retries exceeded
-        err_console.print(f"[red]Error: Maximum retries ({max_retries}) exceeded waiting for lock[/red]")
+        console.print(f"[red]Error: Maximum retries ({max_retries}) exceeded waiting for lock[/red]")
         sys.exit(1)
 
     def _read_pid(self) -> Optional[str]:
@@ -1008,7 +1007,7 @@ class SandboxEnvironment:
                 shutil.rmtree(self.temp_home)
             except Exception as e:
                 # Log warning but don't fail - cleanup is best-effort
-                err_console.print(f"[yellow]Warning: Failed to clean up sandbox directory {self.temp_home}: {e}[/yellow]")
+                console.print(f"[yellow]Warning: Failed to clean up sandbox directory {self.temp_home}: {e}[/yellow]")
 
         return False  # Don't suppress exceptions
 
@@ -1419,7 +1418,7 @@ def add(nickname: Optional[str], creds_file: Optional[str]):
 
         # Get profile to extract UUID
         try:
-            with err_console.status("[bold green]Fetching account profile..."):
+            with console.status("[bold green]Fetching account profile..."):
                 profile = ClaudeAPI.get_profile(token)
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 401:
@@ -1427,7 +1426,7 @@ def add(nickname: Optional[str], creds_file: Optional[str]):
                 console.print("[yellow]Token rejected, attempting refresh...[/yellow]")
                 credentials = refresh_token(json.dumps(credentials), account_uuid=None)
                 token = credentials.get("claudeAiOauth", {}).get("accessToken")
-                with err_console.status("[bold green]Retrying profile fetch..."):
+                with console.status("[bold green]Retrying profile fetch..."):
                     profile = ClaudeAPI.get_profile(token)
             else:
                 raise
@@ -1484,7 +1483,7 @@ def list_accounts_cmd(output_json: bool):
                     "org_type": acc["org_type"],
                     "rate_limit_tier": acc["rate_limit_tier"],
                 })
-            console.print(json.dumps(result, indent=2))
+            print(json.dumps(result, indent=2))
         else:
             if not accounts:
                 console.print("[yellow]No accounts found. Add one with 'c2switcher add'[/yellow]")
@@ -1545,7 +1544,7 @@ def usage(output_json: bool, force: bool):
         for acc in accounts:
             try:
                 display_name = acc['nickname'] or acc['email']
-                with err_console.status(f"[bold green]Fetching usage for {display_name}..."):
+                with console.status(f"[bold green]Fetching usage for {display_name}..."):
                     usage = get_account_usage(db, acc["uuid"], acc["credentials_json"], force=force)
 
                 usage_data.append({
@@ -1576,7 +1575,7 @@ def usage(output_json: bool, force: bool):
                     "sessions": item["sessions"],
                     "error": item.get("error")
                 })
-            console.print(json.dumps(result, indent=2))
+            print(json.dumps(result, indent=2))
         else:
             table = Table(title="Usage Across Accounts", box=box.ROUNDED)
             table.add_column("Index", style="cyan", justify="center")
@@ -1675,7 +1674,8 @@ def usage(output_json: bool, force: bool):
 @cli.command()
 @click.option("--switch", is_flag=True, help="Actually switch to the optimal account")
 @click.option("--session-id", help="Session ID for load balancing and sticky assignment")
-def optimal(switch: bool, session_id: Optional[str]):
+@click.option("--token-only", is_flag=True, help="Output only the token to stdout")
+def optimal(switch: bool, session_id: Optional[str], token_only: bool):
     """Find the optimal account with load balancing and session stickiness"""
     # Lock if switching credentials OR if assigning a session (DB write)
     if switch or session_id:
@@ -1692,6 +1692,36 @@ def optimal(switch: bool, session_id: Optional[str]):
             return
 
         optimal_acc = result['account']
+
+        # Get and refresh token if needed
+        if switch or token_only:
+            credentials = json.loads(optimal_acc["credentials_json"])
+
+            # Refresh if needed
+            account_info = {
+                "uuid": optimal_acc['uuid'],
+                "email": optimal_acc['email'],
+                "org_uuid": optimal_acc['org_uuid'],
+                "display_name": optimal_acc['display_name'],
+                "billing_type": optimal_acc['billing_type'],
+                "org_name": optimal_acc['org_name']
+            }
+            refreshed_creds = refresh_token(json.dumps(credentials), optimal_acc['uuid'], account_info)
+            token = refreshed_creds.get("claudeAiOauth", {}).get("accessToken")
+
+            if not token:
+                console.print("[red]Error: No access token found in credentials[/red]")
+                return
+
+            # Update credentials if refreshed
+            if refreshed_creds != credentials:
+                cursor = db.conn.cursor()
+                cursor.execute(
+                    "UPDATE accounts SET credentials_json = ?, updated_at = CURRENT_TIMESTAMP WHERE uuid = ?",
+                    (json.dumps(refreshed_creds), optimal_acc['uuid'])
+                )
+                db.conn.commit()
+
         nickname = optimal_acc['nickname'] or '[dim]none[/dim]'
         masked_email = mask_email(optimal_acc['email'])
 
@@ -1719,19 +1749,25 @@ def optimal(switch: bool, session_id: Optional[str]):
 
         info_text += session_info
 
-        console.print(Panel(
-            info_text,
-            border_style="green"
-        ))
-
-        if switch:
-            # Write credentials
-            credentials = json.loads(optimal_acc["credentials_json"])
+        if token_only:
+            # Print info to stderr, token to stdout
+            console.print(Panel(
+                info_text,
+                border_style="green"
+            ))
+            print(token)
+        else:
+            # Write credentials file
             CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(CREDENTIALS_PATH, credentials)
+            atomic_write_json(CREDENTIALS_PATH, refreshed_creds)
 
-            # Optionally display success message
-            if not session_id:
+            # Print info to stdout
+            console.print(Panel(
+                info_text,
+                border_style="green"
+            ))
+
+            if switch and not session_id:
                 console.print("[green]✓[/green] Switched to optimal account")
 
     except Exception as e:
@@ -1741,33 +1777,94 @@ def optimal(switch: bool, session_id: Optional[str]):
 
 
 @cli.command()
-@click.argument("identifier")
-def switch(identifier: str):
-    """Switch to a specific account by index, nickname, email, or UUID"""
-    acquire_lock()  # Lock before writing .credentials.json
+@click.argument("identifier", required=False)
+@click.option("--session-id", help="Session ID for load balancing (when no identifier given)")
+@click.option("--token-only", is_flag=True, help="Output only the token to stdout")
+def switch(identifier: Optional[str], session_id: Optional[str], token_only: bool):
+    """Switch to a specific account by index, nickname, email, or UUID
+
+    If no identifier is given, uses optimal account selection with load balancing.
+    """
+    if not identifier and not session_id:
+        console.print("[red]Error: Must provide either an identifier or --session-id for load balancing[/red]")
+        return
+
+    # Lock if switching credentials OR if assigning a session (DB write)
+    if not token_only or session_id:
+        acquire_lock()
+
     db = Database()
 
     try:
-        account = db.get_account_by_identifier(identifier)
+        if identifier:
+            # Switch to specific account
+            account = db.get_account_by_identifier(identifier)
 
-        if not account:
-            console.print(f"[red]Account not found: {identifier}[/red]")
+            if not account:
+                console.print(f"[red]Account not found: {identifier}[/red]")
+                return
+        else:
+            # Use load balancing
+            result = select_account_with_load_balancing(db, session_id)
+            if not result:
+                console.print("[red]No accounts available (all at capacity or no accounts found)[/red]")
+                return
+            account = result['account']
+
+        # Get token
+        credentials = json.loads(account["credentials_json"])
+
+        # Refresh if needed
+        account_info = {
+            "uuid": account['uuid'],
+            "email": account['email'],
+            "org_uuid": account['org_uuid'],
+            "display_name": account['display_name'],
+            "billing_type": account['billing_type'],
+            "org_name": account['org_name']
+        }
+        refreshed_creds = refresh_token(json.dumps(credentials), account['uuid'], account_info)
+        token = refreshed_creds.get("claudeAiOauth", {}).get("accessToken")
+
+        if not token:
+            console.print("[red]Error: No access token found in credentials[/red]")
             return
 
-        # Write credentials
-        credentials = json.loads(account["credentials_json"])
-        CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
-        atomic_write_json(CREDENTIALS_PATH, credentials)
+        # Update credentials if refreshed
+        if refreshed_creds != credentials:
+            cursor = db.conn.cursor()
+            cursor.execute(
+                "UPDATE accounts SET credentials_json = ?, updated_at = CURRENT_TIMESTAMP WHERE uuid = ?",
+                (json.dumps(refreshed_creds), account['uuid'])
+            )
+            db.conn.commit()
 
         nickname = account['nickname'] or '[dim]none[/dim]'
         masked_email = mask_email(account['email'])
 
-        console.print(Panel(
+        panel_content = (
             f"[green]Switched to account (={account['index_num']})[/green]\n\n"
             f"Nickname: [bold]{nickname}[/bold]\n"
-            f"Email: [bold]{masked_email}[/bold]",
-            border_style="green"
-        ))
+            f"Email: [bold]{masked_email}[/bold]"
+        )
+
+        if token_only:
+            # Print info to stderr, token to stdout
+            console.print(Panel(
+                panel_content,
+                border_style="green"
+            ))
+            print(token)
+        else:
+            # Write credentials file
+            CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(CREDENTIALS_PATH, refreshed_creds)
+
+            # Print info to stdout
+            console.print(Panel(
+                panel_content,
+                border_style="green"
+            ))
 
     finally:
         db.close()
@@ -2005,7 +2102,7 @@ def start_session(session_id: str, pid: int, parent_pid: Optional[int], cwd: str
         # Silently succeed - wrapper redirects stderr to /dev/null
     except Exception as e:
         # Log error but don't fail the wrapper
-        err_console.print(f"[yellow]Warning: Failed to register session: {e}[/yellow]")
+        console.print(f"[yellow]Warning: Failed to register session: {e}[/yellow]")
     finally:
         db.close()
 
@@ -2021,7 +2118,7 @@ def end_session(session_id: str):
         db.mark_session_ended(session_id)
         # Silently succeed
     except Exception as e:
-        err_console.print(f"[yellow]Warning: Failed to end session: {e}[/yellow]")
+        console.print(f"[yellow]Warning: Failed to end session: {e}[/yellow]")
     finally:
         db.close()
 

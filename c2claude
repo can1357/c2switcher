@@ -96,16 +96,23 @@ c2switcher start-session \
     --cwd "$(pwd)" \
     2>/dev/null || true
 
-# Determine which account to use
+# Get OAuth token via environment variable (no file writes!)
 if [[ "$use_optimal" == true ]]; then
-    # Use optimal account with load balancing
-    c2switcher optimal --session-id "$SESSION_ID" --switch 2>/dev/null
+    # Use optimal account with load balancing - get token only
+    # Info goes to stderr (visible), token goes to stdout (captured)
+    CLAUDE_CODE_OAUTH_TOKEN=$(c2switcher optimal --session-id "$SESSION_ID" --token-only)
 elif [[ -n "$selected_account" ]]; then
-    # Switch to specific account (no session tracking)
-    c2switcher switch "$selected_account"
+    # Switch to specific account - get token only (no session tracking)
+    # Info goes to stderr (visible), token goes to stdout (captured)
+    CLAUDE_CODE_OAUTH_TOKEN=$(c2switcher switch "$selected_account" --token-only)
 elif [[ "$cycle" == true ]]; then
-    # Cycle through accounts (no session tracking)
+    # Cycle through accounts - still writes credentials file (legacy behavior)
     c2switcher cycle
+fi
+
+# Export token if we got one
+if [[ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]]; then
+    export CLAUDE_CODE_OAUTH_TOKEN
 fi
 
 # Run claude with remaining arguments (don't use exec - we need to cleanup after)
