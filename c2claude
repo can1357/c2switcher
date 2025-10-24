@@ -86,7 +86,6 @@ done
 
 export DISABLE_BUG_COMMAND=1
 export DISABLE_COST_WARNINGS=1
-export DISABLE_ERROR_REPORTING=1
 export DISABLE_TELEMETRY=1
 
 # Register session start
