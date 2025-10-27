@@ -127,57 +127,101 @@ Rectangle {
         const sevenDay = accountData.usage.seven_day
         const sevenDayOpus = accountData.usage.seven_day_opus
 
-        if (!sevenDay || !sevenDay.resets_at) return null
+        // Need at least one reset window
+        if (!sevenDay && !sevenDayOpus) return null
 
-        const opusUtil = sevenDayOpus && sevenDayOpus.utilization !== null ? sevenDayOpus.utilization : 0
-        const overallUtil = sevenDay.utilization !== null ? sevenDay.utilization : 0
+        const opusUtil = sevenDayOpus && sevenDayOpus.utilization !== null ? sevenDayOpus.utilization : null
+        const overallUtil = sevenDay && sevenDay.utilization !== null ? sevenDay.utilization : null
 
-        // Parse reset time
-        const resetDate = new Date(sevenDay.resets_at)
         const now = new Date()
-        const timeRemaining = resetDate - now
-
-        if (timeRemaining <= 0) return null
-
-        // Calculate time elapsed
         const sevenDaysMs = 7 * 24 * 60 * 60 * 1000
-        const timeElapsed = sevenDaysMs - timeRemaining
-        const expectedUsage = (timeElapsed / sevenDaysMs) * 100
+        let worstRate = 0
 
-        if (expectedUsage <= 0) return null
+        // Calculate Opus rate with its own reset window
+        if (opusUtil !== null && sevenDayOpus && sevenDayOpus.resets_at) {
+            const opusResetDate = new Date(sevenDayOpus.resets_at)
+            const opusTimeRemaining = opusResetDate - now
 
-        // Calculate overuse rate
-        const actualUsage = Math.max(opusUtil, overallUtil)
-        const rate = (actualUsage / expectedUsage) * 100
+            if (opusTimeRemaining > 0) {
+                const opusElapsed = sevenDaysMs - opusTimeRemaining
+                const opusExpected = (opusElapsed / sevenDaysMs) * 100
 
-        return Math.round(rate)
+                if (opusExpected > 0) {
+                    const opusRate = (opusUtil / opusExpected) * 100
+                    worstRate = Math.max(worstRate, opusRate)
+                }
+            }
+        }
+
+        // Calculate Overall rate with its own reset window
+        if (overallUtil !== null && sevenDay && sevenDay.resets_at) {
+            const overallResetDate = new Date(sevenDay.resets_at)
+            const overallTimeRemaining = overallResetDate - now
+
+            if (overallTimeRemaining > 0) {
+                const overallElapsed = sevenDaysMs - overallTimeRemaining
+                const overallExpected = (overallElapsed / sevenDaysMs) * 100
+
+                if (overallExpected > 0) {
+                    const overallRate = (overallUtil / overallExpected) * 100
+                    worstRate = Math.max(worstRate, overallRate)
+                }
+            }
+        }
+
+        return worstRate > 0 ? Math.round(worstRate) : null
     }
 
     function getResetTimeText() {
-        if (!accountData.usage || !accountData.usage.seven_day || !accountData.usage.seven_day.resets_at) {
-            return "No reset time available"
+        if (!accountData.usage) {
+            return "No usage data available"
         }
 
-        const resetDate = new Date(accountData.usage.seven_day.resets_at)
+        const sevenDay = accountData.usage.seven_day
+        const sevenDayOpus = accountData.usage.seven_day_opus
         const now = new Date()
-        const timeRemaining = resetDate - now
 
-        if (timeRemaining <= 0) {
-            return "7d period resetting soon..."
+        let lines = []
+
+        // Format time remaining helper
+        function formatTimeRemaining(timeRemaining) {
+            const days = Math.floor(timeRemaining / (24 * 60 * 60 * 1000))
+            const hours = Math.floor((timeRemaining % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000))
+            const minutes = Math.floor((timeRemaining % (60 * 60 * 1000)) / (60 * 1000))
+
+            if (days > 0) {
+                return `${days}d ${hours}h ${minutes}m`
+            } else if (hours > 0) {
+                return `${hours}h ${minutes}m`
+            } else {
+                return `${minutes}m`
+            }
         }
 
-        // Calculate time components
-        const days = Math.floor(timeRemaining / (24 * 60 * 60 * 1000))
-        const hours = Math.floor((timeRemaining % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000))
-        const minutes = Math.floor((timeRemaining % (60 * 60 * 1000)) / (60 * 1000))
+        // Opus reset
+        if (sevenDayOpus && sevenDayOpus.resets_at) {
+            const opusResetDate = new Date(sevenDayOpus.resets_at)
+            const opusTimeRemaining = opusResetDate - now
 
-        // Format the output
-        if (days > 0) {
-            return `7d resets in ${days}d ${hours}h ${minutes}m`
-        } else if (hours > 0) {
-            return `7d resets in ${hours}h ${minutes}m`
-        } else {
-            return `7d resets in ${minutes}m`
+            if (opusTimeRemaining > 0) {
+                lines.push(`Opus resets in ${formatTimeRemaining(opusTimeRemaining)}`)
+            } else {
+                lines.push("Opus: resetting soon...")
+            }
         }
+
+        // Overall reset
+        if (sevenDay && sevenDay.resets_at) {
+            const overallResetDate = new Date(sevenDay.resets_at)
+            const overallTimeRemaining = overallResetDate - now
+
+            if (overallTimeRemaining > 0) {
+                lines.push(`Overall resets in ${formatTimeRemaining(overallTimeRemaining)}`)
+            } else {
+                lines.push("Overall: resetting soon...")
+            }
+        }
+
+        return lines.length > 0 ? lines.join("\n") : "No reset time available"
     }
 }

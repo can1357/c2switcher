@@ -191,35 +191,44 @@ def mask_email(email: str) -> str:
     return f"{masked_local}@{domain}"
 
 
-def format_time_until_reset(resets_at: Optional[str], opus_usage: Optional[int] = None, overall_usage: Optional[int] = None) -> str:
+def format_time_until_reset(
+    opus_resets_at: Optional[str],
+    overall_resets_at: Optional[str],
+    opus_usage: Optional[int] = None,
+    overall_usage: Optional[int] = None
+) -> str:
     """
     Format time remaining until reset timestamp with usage rate percentage.
 
+    Calculates separate usage rates for Opus and Overall based on their respective
+    reset windows, then displays the worst (highest) rate.
+
     Args:
-        resets_at: ISO format timestamp string (e.g., "2025-10-30T12:00:00Z")
+        opus_resets_at: ISO format timestamp for Opus reset (e.g., "2025-10-30T12:00:00Z")
+        overall_resets_at: ISO format timestamp for Overall reset
         opus_usage: Current opus usage percentage (0-100)
         overall_usage: Current overall usage percentage (0-100)
 
     Returns:
         Formatted time string with usage rate (e.g., "2d 5h (140%)", "6h 30m (85%)")
-        Usage rate = max(opus, overall) / (time_elapsed / 7_days) * 100
+        Shows the closer reset time and the worst usage rate from either window.
     """
-    if not resets_at:
+    # Determine which reset window to display (the closer one)
+    # This is typically the Opus reset when it's available and closer
+    display_reset = opus_resets_at if opus_resets_at else overall_resets_at
+
+    if not display_reset:
         return "[dim]--[/dim]"
 
     try:
-        # Parse ISO timestamp
-        reset_dt = datetime.fromisoformat(resets_at.replace('Z', '+00:00'))
-
-        # Ensure it's treated as UTC if naive
+        # Parse the display reset timestamp
+        reset_dt = datetime.fromisoformat(display_reset.replace('Z', '+00:00'))
         if reset_dt.tzinfo is None:
             reset_dt = reset_dt.replace(tzinfo=timezone.utc)
 
-        # Calculate time remaining
         now = datetime.now(timezone.utc)
         time_remaining = reset_dt - now
 
-        # If already expired, show as expired
         if time_remaining.total_seconds() <= 0:
             return "[dim]expired[/dim]"
 
@@ -236,29 +245,54 @@ def format_time_until_reset(resets_at: Optional[str], opus_usage: Optional[int] 
         else:
             time_str = f"{minutes}m"
 
-        # Calculate usage rate if usage data provided
+        # Calculate usage rate for BOTH windows separately, then show the worst
         rate_str = ""
-        if opus_usage is not None and overall_usage is not None:
-            # 7 days in seconds
+        if opus_usage is not None or overall_usage is not None:
             seven_days_seconds = 7 * 86400
-            # Time elapsed since start of period
-            time_elapsed_seconds = seven_days_seconds - time_remaining.total_seconds()
-            # Expected usage based on linear progression
-            expected_usage = (time_elapsed_seconds / seven_days_seconds) * 100
+            worst_rate = 0.0
 
-            if expected_usage > 0:
-                # Actual usage is max of opus and overall
-                actual_usage = max(opus_usage, overall_usage)
-                # Usage rate as percentage
-                usage_rate = (actual_usage / expected_usage) * 100
+            # Calculate Opus rate if available
+            if opus_usage is not None and opus_resets_at:
+                try:
+                    opus_reset_dt = datetime.fromisoformat(opus_resets_at.replace('Z', '+00:00'))
+                    if opus_reset_dt.tzinfo is None:
+                        opus_reset_dt = opus_reset_dt.replace(tzinfo=timezone.utc)
 
-                # Color code the rate
-                if usage_rate >= 120:
-                    rate_str = f" [red]({usage_rate:.0f}%)[/red]"
-                elif usage_rate >= 100:
-                    rate_str = f" [yellow]({usage_rate:.0f}%)[/yellow]"
+                    opus_time_remaining = opus_reset_dt - now
+                    if opus_time_remaining.total_seconds() > 0:
+                        opus_elapsed = seven_days_seconds - opus_time_remaining.total_seconds()
+                        opus_expected = (opus_elapsed / seven_days_seconds) * 100
+                        if opus_expected > 0:
+                            opus_rate = (opus_usage / opus_expected) * 100
+                            worst_rate = max(worst_rate, opus_rate)
+                except Exception:
+                    pass
+
+            # Calculate Overall rate if available
+            if overall_usage is not None and overall_resets_at:
+                try:
+                    overall_reset_dt = datetime.fromisoformat(overall_resets_at.replace('Z', '+00:00'))
+                    if overall_reset_dt.tzinfo is None:
+                        overall_reset_dt = overall_reset_dt.replace(tzinfo=timezone.utc)
+
+                    overall_time_remaining = overall_reset_dt - now
+                    if overall_time_remaining.total_seconds() > 0:
+                        overall_elapsed = seven_days_seconds - overall_time_remaining.total_seconds()
+                        overall_expected = (overall_elapsed / seven_days_seconds) * 100
+                        if overall_expected > 0:
+                            overall_rate = (overall_usage / overall_expected) * 100
+                            worst_rate = max(worst_rate, overall_rate)
+                except Exception:
+                    pass
+
+            # Display worst rate if we calculated any
+            if worst_rate > 0:
+                if worst_rate >= 120:
+                    rate_str = f" [red]({worst_rate:.0f}%)[/red]"
+                elif worst_rate >= 100:
+                    rate_str = f" [yellow]({worst_rate:.0f}%)[/yellow]"
                 else:
-                    rate_str = f" [green]({usage_rate:.0f}%)[/green]"
+                    rate_str = f" [green]({worst_rate:.0f}%)[/green]"
 
         return time_str + rate_str
 
@@ -1699,11 +1733,14 @@ def usage(output_json: bool, force: bool):
                         else:
                             return f"[green]{val}%[/green]"
 
-                    # Calculate time until 7d reset with usage rate
+                    # Calculate time until reset with usage rate (separate windows for opus vs overall)
                     opus_util = seven_day_opus.get("utilization")
                     overall_util = seven_day.get("utilization")
+                    opus_resets = seven_day_opus.get("resets_at") if seven_day_opus else None
+                    overall_resets = seven_day.get("resets_at")
                     reset_time = format_time_until_reset(
-                        seven_day.get("resets_at"),
+                        opus_resets,
+                        overall_resets,
                         opus_util if opus_util is not None else 0,
                         overall_util if overall_util is not None else 0
                     )
