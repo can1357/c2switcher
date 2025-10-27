@@ -45,7 +45,7 @@ Rectangle {
         onClicked: card.switchClicked()
 
         QQC2.ToolTip.visible: containsMouse
-        QQC2.ToolTip.text: "Click to switch to this account"
+        QQC2.ToolTip.text: getResetTimeText()
     }
 
     RowLayout {
@@ -151,5 +151,33 @@ Rectangle {
         const rate = (actualUsage / expectedUsage) * 100
 
         return Math.round(rate)
+    }
+
+    function getResetTimeText() {
+        if (!accountData.usage || !accountData.usage.seven_day || !accountData.usage.seven_day.resets_at) {
+            return "No reset time available"
+        }
+
+        const resetDate = new Date(accountData.usage.seven_day.resets_at)
+        const now = new Date()
+        const timeRemaining = resetDate - now
+
+        if (timeRemaining <= 0) {
+            return "7d period resetting soon..."
+        }
+
+        // Calculate time components
+        const days = Math.floor(timeRemaining / (24 * 60 * 60 * 1000))
+        const hours = Math.floor((timeRemaining % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000))
+        const minutes = Math.floor((timeRemaining % (60 * 60 * 1000)) / (60 * 1000))
+
+        // Format the output
+        if (days > 0) {
+            return `7d resets in ${days}d ${hours}h ${minutes}m`
+        } else if (hours > 0) {
+            return `7d resets in ${hours}h ${minutes}m`
+        } else {
+            return `7d resets in ${minutes}m`
+        }
     }
 }
