@@ -9,6 +9,7 @@ ColumnLayout {
     property string label: ""
     property var value: null
     property bool highlight: false
+    property bool isRate: false  // If true, treats value as usage rate (100% = expected)
 
     spacing: Kirigami.Units.smallSpacing / 2
 
@@ -29,14 +30,26 @@ ColumnLayout {
                 return Qt.rgba(Kirigami.Theme.backgroundColor.r, Kirigami.Theme.backgroundColor.g, Kirigami.Theme.backgroundColor.b, 0.5)
             }
 
-            // Subtle background based on usage level
-            if (indicator.value >= 90) {
-                return Qt.rgba(0.8, 0.3, 0.2, 0.2)  // Subtle red tint
+            // Color logic based on indicator type
+            if (indicator.isRate) {
+                // For rate: 100% = expected, >120% = overuse
+                if (indicator.value >= 120) {
+                    return Qt.rgba(0.8, 0.3, 0.2, 0.2)  // Red for heavy overuse
+                }
+                if (indicator.value >= 100) {
+                    return Qt.rgba(0.9, 0.6, 0.3, 0.2)  // Orange for slight overuse
+                }
+                return Qt.rgba(0.4, 0.7, 0.3, 0.15)  // Green for under-use
+            } else {
+                // For usage: >90% = high
+                if (indicator.value >= 90) {
+                    return Qt.rgba(0.8, 0.3, 0.2, 0.2)
+                }
+                if (indicator.value >= 70) {
+                    return Qt.rgba(0.9, 0.6, 0.3, 0.2)
+                }
+                return Qt.rgba(0.4, 0.7, 0.3, 0.15)
             }
-            if (indicator.value >= 70) {
-                return Qt.rgba(0.9, 0.6, 0.3, 0.2)  // Subtle orange tint
-            }
-            return Qt.rgba(0.4, 0.7, 0.3, 0.15)  // Subtle green tint
         }
 
         border.width: 1
@@ -47,13 +60,25 @@ ColumnLayout {
             if (indicator.value === null) {
                 return Qt.rgba(Kirigami.Theme.textColor.r, Kirigami.Theme.textColor.g, Kirigami.Theme.textColor.b, 0.2)
             }
-            if (indicator.value >= 90) {
-                return Qt.rgba(0.8, 0.3, 0.2, 0.4)
+
+            // Border color based on indicator type
+            if (indicator.isRate) {
+                if (indicator.value >= 120) {
+                    return Qt.rgba(0.8, 0.3, 0.2, 0.4)
+                }
+                if (indicator.value >= 100) {
+                    return Qt.rgba(0.9, 0.6, 0.3, 0.4)
+                }
+                return Qt.rgba(0.4, 0.7, 0.3, 0.3)
+            } else {
+                if (indicator.value >= 90) {
+                    return Qt.rgba(0.8, 0.3, 0.2, 0.4)
+                }
+                if (indicator.value >= 70) {
+                    return Qt.rgba(0.9, 0.6, 0.3, 0.4)
+                }
+                return Qt.rgba(0.4, 0.7, 0.3, 0.3)
             }
-            if (indicator.value >= 70) {
-                return Qt.rgba(0.9, 0.6, 0.3, 0.4)
-            }
-            return Qt.rgba(0.4, 0.7, 0.3, 0.3)
         }
 
         Behavior on color {

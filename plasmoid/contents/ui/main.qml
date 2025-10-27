@@ -14,6 +14,8 @@ PlasmoidItem {
     property var accounts: []
     property int totalUsage: 0
     property int opusUsage: 0
+    property int activeSessions: 0
+    property string resetTime: ""
     property bool loading: true
     property bool hasError: false
 
