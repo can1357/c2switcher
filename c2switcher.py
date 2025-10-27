@@ -191,6 +191,81 @@ def mask_email(email: str) -> str:
     return f"{masked_local}@{domain}"
 
 
+def format_time_until_reset(resets_at: Optional[str], opus_usage: Optional[int] = None, overall_usage: Optional[int] = None) -> str:
+    """
+    Format time remaining until reset timestamp with usage rate percentage.
+
+    Args:
+        resets_at: ISO format timestamp string (e.g., "2025-10-30T12:00:00Z")
+        opus_usage: Current opus usage percentage (0-100)
+        overall_usage: Current overall usage percentage (0-100)
+
+    Returns:
+        Formatted time string with usage rate (e.g., "2d 5h (140%)", "6h 30m (85%)")
+        Usage rate = max(opus, overall) / (time_elapsed / 7_days) * 100
+    """
+    if not resets_at:
+        return "[dim]--[/dim]"
+
+    try:
+        # Parse ISO timestamp
+        reset_dt = datetime.fromisoformat(resets_at.replace('Z', '+00:00'))
+
+        # Ensure it's treated as UTC if naive
+        if reset_dt.tzinfo is None:
+            reset_dt = reset_dt.replace(tzinfo=timezone.utc)
+
+        # Calculate time remaining
+        now = datetime.now(timezone.utc)
+        time_remaining = reset_dt - now
+
+        # If already expired, show as expired
+        if time_remaining.total_seconds() <= 0:
+            return "[dim]expired[/dim]"
+
+        total_seconds = int(time_remaining.total_seconds())
+        days = total_seconds // 86400
+        hours = (total_seconds % 86400) // 3600
+        minutes = (total_seconds % 3600) // 60
+
+        # Format time based on magnitude (compact format)
+        if days > 0:
+            time_str = f"{days}d{hours}h"
+        elif hours > 0:
+            time_str = f"{hours}h{minutes}m"
+        else:
+            time_str = f"{minutes}m"
+
+        # Calculate usage rate if usage data provided
+        rate_str = ""
+        if opus_usage is not None and overall_usage is not None:
+            # 7 days in seconds
+            seven_days_seconds = 7 * 86400
+            # Time elapsed since start of period
+            time_elapsed_seconds = seven_days_seconds - time_remaining.total_seconds()
+            # Expected usage based on linear progression
+            expected_usage = (time_elapsed_seconds / seven_days_seconds) * 100
+
+            if expected_usage > 0:
+                # Actual usage is max of opus and overall
+                actual_usage = max(opus_usage, overall_usage)
+                # Usage rate as percentage
+                usage_rate = (actual_usage / expected_usage) * 100
+
+                # Color code the rate
+                if usage_rate >= 120:
+                    rate_str = f" [red]({usage_rate:.0f}%)[/red]"
+                elif usage_rate >= 100:
+                    rate_str = f" [yellow]({usage_rate:.0f}%)[/yellow]"
+                else:
+                    rate_str = f" [green]({usage_rate:.0f}%)[/green]"
+
+        return time_str + rate_str
+
+    except Exception:
+        return "[dim]--[/dim]"
+
+
 def atomic_write_json(path: Path, data: Dict, preserve_permissions: bool = True):
     """
     Atomically write JSON data to a file.
@@ -1584,6 +1659,7 @@ def usage(output_json: bool, force: bool):
             table.add_column("5h", justify="right")
             table.add_column("7d", justify="right")
             table.add_column("7d Opus", justify="right")
+            table.add_column("Reset (Rate)", justify="right", no_wrap=True)
             table.add_column("Sessions", style="blue", justify="center")
 
             for item in usage_data:
@@ -1605,6 +1681,7 @@ def usage(output_json: bool, force: bool):
                         "[red]Error[/red]",
                         "[red]Error[/red]",
                         "[red]Error[/red]",
+                        "[red]Error[/red]",
                         session_str
                     )
                 else:
@@ -1622,6 +1699,15 @@ def usage(output_json: bool, force: bool):
                         else:
                             return f"[green]{val}%[/green]"
 
+                    # Calculate time until 7d reset with usage rate
+                    opus_util = seven_day_opus.get("utilization")
+                    overall_util = seven_day.get("utilization")
+                    reset_time = format_time_until_reset(
+                        seven_day.get("resets_at"),
+                        opus_util if opus_util is not None else 0,
+                        overall_util if overall_util is not None else 0
+                    )
+
                     table.add_row(
                         str(acc["index_num"]),
                         acc["nickname"] or "[dim]--[/dim]",
@@ -1629,6 +1715,7 @@ def usage(output_json: bool, force: bool):
                         format_usage(five_hour.get("utilization")),
                         format_usage(seven_day.get("utilization")),
                         format_usage(seven_day_opus.get("utilization")),
+                        reset_time,
                         session_str
                     )
 
