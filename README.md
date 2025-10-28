@@ -53,10 +53,10 @@ The interactive installer will ask what you want to install:
 ### Alternative: Manual Installation
 
 ```bash
-# Install Python package
+# Install the package locally (editable)
 pip install -e .
 
-# Or use setup.sh with options
+# Or use setup.sh with options (installs via pip under the hood)
 ./setup.sh --cli        # CLI tools only
 ./setup.sh --plasmoid   # Plasmoid only (requires CLI)
 ./setup.sh --all        # Install everything
@@ -143,6 +143,27 @@ JSON output for scripting:
 c2switcher usage --json
 ```
 
+### Generating Analytics Reports
+
+Two rich analytics dashboards are built in. Each command prints a detailed terminal summary and saves a PNG visualization (default paths shown).
+
+```bash
+# Session insights (top projects, daily cadence, heatmaps, recommendations)
+c2switcher report-sessions \
+  --db ~/.c2switcher/store.db \
+  --output ~/c2switcher_session_report.png \
+  --days 30 \
+  --min-duration 60
+
+# Usage risk forecast (limit timing, burn rates, reset timeline)
+c2switcher report-usage \
+  --db ~/.c2switcher/store.db \
+  --output ~/c2switcher_usage_report.png \
+  --window-hours 24
+```
+
+Add `--show` if you want the figure displayed after it is written.
+
 ### Switching Accounts
 
 Switch by index:
@@ -223,6 +244,19 @@ The wrapper handles:
 - Account stickiness (reuses the same account for a session)
 - Cleanup on exit
 
+## Development
+
+Want to hack on the tool?
+
+```bash
+git clone https://github.com/can1357/c2switcher.git
+cd c2switcher
+pip install -e .
+python -m c2switcher --help
+```
+
+The CLI entry point is `c2switcher`, and everything now lives under the `c2switcher/` package for easier maintenance.
+
 ## KDE Plasma Widget
 
 ### Features
@@ -255,16 +289,18 @@ kpackagetool6 --type=Plasma/Applet --install plasmoid
 
 ### Core Commands
 
-| Command    | Aliases                 | Description                          |
-| ---------- | ----------------------- | ------------------------------------ |
-| `add`      |                         | Add a new account                    |
-| `ls`       | `list`, `list-accounts` | List all accounts                    |
-| `usage`    |                         | Show usage across accounts           |
-| `optimal`  | `pick`                  | Find optimal account                 |
-| `switch`   | `use`                   | Switch to specific account           |
-| `cycle`    |                         | Rotate to next account               |
-| `sessions` |                         | List active sessions                 |
-| `history`  | `session-history`       | Show past sessions with usage deltas |
+| Command           | Aliases                 | Description                              |
+| ----------------- | ----------------------- | ---------------------------------------- |
+| `add`             |                         | Add a new account                        |
+| `ls`              | `list`, `list-accounts` | List all accounts                        |
+| `usage`           |                         | Show usage across accounts               |
+| `report-sessions` |                         | Generate session analytics report        |
+| `report-usage`    |                         | Generate usage risk forecast report      |
+| `optimal`         | `pick`                  | Find optimal account                     |
+| `switch`          | `use`                   | Switch to specific account               |
+| `cycle`           |                         | Rotate to next account                   |
+| `sessions`        |                         | List active sessions                     |
+| `history`         | `session-history`       | Show past sessions with usage deltas     |
 
 ### Session Commands
 

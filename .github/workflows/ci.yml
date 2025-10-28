@@ -24,27 +24,28 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install -e .
         pip install ruff
 
     - name: Lint with ruff
       run: |
         # Stop the build if there are Python syntax errors or undefined names
-        ruff check c2switcher.py --select=E9,F63,F7,F82 --output-format=full
+        ruff check c2switcher/ --select=E9,F63,F7,F82 --output-format=full
         # Warn on other issues but don't fail
-        ruff check c2switcher.py --exit-zero
+        ruff check c2switcher/ --exit-zero
 
     - name: Check Python syntax
       run: |
-        python -m py_compile c2switcher.py
+        python -m py_compile c2switcher/*.py
 
-    - name: Verify imports
+    - name: Verify package imports
       run: |
-        python -c "import c2switcher; print('✓ c2switcher imports successfully')"
+        python -c "import c2switcher; print('✓ c2switcher package imports successfully')"
+        python -c "from c2switcher.cli import cli; print('✓ c2switcher.cli imports successfully')"
 
     - name: Check entry point
       run: |
-        python c2switcher.py --help
+        c2switcher --help
 
   shellcheck:
     runs-on: ubuntu-latest

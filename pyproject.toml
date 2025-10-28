@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=67", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "c2switcher"
+version = "1.0.0"
+description = "Claude Code Account Switcher - Manage multiple Claude Code accounts"
+readme = "README.md"
+authors = [{ name = "Can Bölük" }]
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+dependencies = [
+    "click>=8.1.0",
+    "rich>=13.0.0",
+    "requests>=2.31.0",
+    "psutil>=5.9.0",
+    "filelock>=3.12.0",
+    "pandas>=1.5.0",
+    "numpy>=1.23.0",
+    "matplotlib>=3.7.0",
+]
+
+[project.scripts]
+c2switcher = "c2switcher.cli:cli"
+
+[tool.setuptools]
+packages = ["c2switcher"]
+script-files = ["c2claude"]
+include-package-data = true

@@ -19,7 +19,6 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Configuration
-INSTALL_DIR="/usr/local/bin"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLASMOID_DIR="$SCRIPT_DIR/plasmoid"
 PLASMOID_ID="org.claudecode.usage.plasma"
@@ -68,11 +67,12 @@ if [[ "$UNINSTALL" == true ]]; then
     echo -e "${YELLOW}Uninstalling c2switcher...${NC}"
     echo
 
-    # Remove CLI files
-    if [[ -f "$INSTALL_DIR/c2switcher" ]] || [[ -f "$INSTALL_DIR/c2claude" ]]; then
-        echo -e "${BLUE}Removing CLI tools...${NC}"
-        sudo rm -f "$INSTALL_DIR/c2switcher" "$INSTALL_DIR/c2claude"
-        echo -e "${GREEN}✓ CLI tools removed${NC}"
+    echo -e "${BLUE}Removing CLI package...${NC}"
+    if sudo python3 -m pip show c2switcher &> /dev/null; then
+        sudo python3 -m pip uninstall -y c2switcher
+        echo -e "${GREEN}✓ CLI package removed${NC}"
+    else
+        echo -e "${YELLOW}c2switcher package not found via pip${NC}"
     fi
 
     # Remove plasmoid
@@ -137,53 +137,19 @@ if [[ "$INSTALL_CLI" == true ]]; then
     echo -e "${GREEN}Installing CLI tools...${NC}"
     echo
 
-    # Create install directory if it doesn't exist
-    if [[ ! -d "$INSTALL_DIR" ]]; then
-        echo -e "${YELLOW}Creating $INSTALL_DIR${NC}"
-        sudo mkdir -p "$INSTALL_DIR"
-    fi
-
-    # Check for Python dependencies
-    echo -e "${BLUE}Checking Python dependencies...${NC}"
-    missing_deps=()
-
-    for dep in click rich requests psutil filelock; do
-        if ! python3 -c "import $dep" 2>/dev/null; then
-            missing_deps+=("$dep")
-        fi
-    done
-
-    if [ ${#missing_deps[@]} -gt 0 ]; then
-        echo -e "${YELLOW}Missing dependencies: ${missing_deps[*]}${NC}"
-        echo "Installing dependencies..."
-        pip3 install --user -r "$SCRIPT_DIR/requirements.txt"
-        echo
-    else
-        echo -e "${GREEN}✓ All dependencies installed${NC}"
-    fi
-
-    # Install c2switcher
-    echo -e "${BLUE}Installing c2switcher...${NC}"
-    sudo cp "$SCRIPT_DIR/c2switcher.py" "$INSTALL_DIR/c2switcher"
-    sudo chmod +x "$INSTALL_DIR/c2switcher"
+    echo -e "${BLUE}Installing c2switcher package...${NC}"
+    sudo python3 -m pip install --upgrade "$SCRIPT_DIR"
     echo -e "${GREEN}✓ c2switcher installed${NC}"
-
-    # Install c2claude
-    echo -e "${BLUE}Installing c2claude...${NC}"
-    sudo cp "$SCRIPT_DIR/c2claude" "$INSTALL_DIR/c2claude"
-    sudo chmod +x "$INSTALL_DIR/c2claude"
-    echo -e "${GREEN}✓ c2claude installed${NC}"
 
     echo
 
-    # Check PATH
-    if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-        echo -e "${YELLOW}Warning: $INSTALL_DIR is not in your PATH${NC}"
-        echo "Add the following to your ~/.bashrc or ~/.zshrc:"
-        echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
+    # Verify command visibility
+    if ! command -v c2switcher &> /dev/null; then
+        echo -e "${YELLOW}Warning: 'c2switcher' is not currently on your PATH${NC}"
+        echo "You may need to adjust your PATH or install with --user instead of sudo."
         echo
     else
-        echo -e "${GREEN}✓ $INSTALL_DIR is in your PATH${NC}"
+        echo -e "${GREEN}✓ c2switcher command available at $(command -v c2switcher)${NC}"
     fi
 fi
 
