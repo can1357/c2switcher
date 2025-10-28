@@ -220,3 +220,5 @@ __marimo__/
 .c2switcher.db-journal
 *.ini
 serena-supervisord.ini
+
+claude.js

@@ -16,7 +16,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import requests
 import psutil
 import click
@@ -35,6 +35,7 @@ LOCK_PATH = C2SWITCHER_DIR / ".lock"
 HEADERS_PATH = C2SWITCHER_DIR / "headers.json"
 CLAUDE_DIR = Path.home() / ".claude"
 CREDENTIALS_PATH = CLAUDE_DIR / ".credentials.json"
+LB_STATE_PATH = C2SWITCHER_DIR / "load_balancer_state.json"
 
 # Global lock state
 _lock_acquired = None  # Stores the FileLock instance if acquired
@@ -674,8 +675,8 @@ class Database:
         ))
         self.conn.commit()
 
-    def get_recent_usage(self, account_uuid: str, max_age_seconds: int = 30) -> Optional[Dict]:
-        """Get recent usage data if available (within max_age_seconds)"""
+    def get_recent_usage(self, account_uuid: str, max_age_seconds: int = 30) -> Optional[Tuple[Dict, str]]:
+        """Get recent usage data if available (within max_age_seconds)."""
         cursor = self.conn.cursor()
 
         # Use SQLite's datetime functions for proper comparison
@@ -689,8 +690,52 @@ class Database:
 
         row = cursor.fetchone()
         if row:
-            return json.loads(row[0])
+            return json.loads(row[0]), row[1]
         return None
+
+    def get_usage_delta_percentile(self, account_uuid: str, percentile: float = 95.0, limit: int = 25) -> float:
+        """Estimate recent utilization burst (percentile delta) for an account."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT seven_day_opus_utilization, seven_day_utilization
+            FROM usage_history
+            WHERE account_uuid = ?
+            ORDER BY queried_at DESC
+            LIMIT ?
+            """,
+            (account_uuid, limit)
+        )
+        rows = cursor.fetchall()
+        if len(rows) < 2:
+            return DEFAULT_BURST_BUFFER  # default safety buffer
+
+        deltas: List[float] = []
+        prev_opus: Optional[float] = None
+        prev_overall: Optional[float] = None
+
+        for row in rows:
+            opus_util, overall_util = row
+            if prev_opus is not None and opus_util is not None:
+                deltas.append(abs(prev_opus - opus_util))
+            if prev_overall is not None and overall_util is not None:
+                deltas.append(abs(prev_overall - overall_util))
+            prev_opus = opus_util if opus_util is not None else prev_opus
+            prev_overall = overall_util if overall_util is not None else prev_overall
+
+        deltas = [d for d in deltas if d is not None]
+        if not deltas:
+            return DEFAULT_BURST_BUFFER
+
+        deltas.sort()
+        pct = max(0.0, min(100.0, percentile))
+        pos = pct / 100.0 * (len(deltas) - 1)
+        lower = int(pos)
+        upper = min(lower + 1, len(deltas) - 1)
+        if lower == upper:
+            return float(deltas[lower])
+        frac = pos - lower
+        return float(deltas[lower] + (deltas[upper] - deltas[lower]) * frac)
 
     def get_all_accounts(self) -> List[sqlite3.Row]:
         """Get all accounts"""
@@ -1314,7 +1359,18 @@ def get_account_usage(db: Database, account_uuid: str, credentials_json: str, fo
     if not force:
         cached = db.get_recent_usage(account_uuid, max_age_seconds=300)
         if cached:
-            return cached
+            usage, queried_at = cached
+            usage_copy = copy.deepcopy(usage)
+            cache_age = None
+            try:
+                cache_dt = datetime.fromisoformat(queried_at.replace('Z', '+00:00'))
+                cache_age = max((datetime.now(timezone.utc) - cache_dt).total_seconds(), 0)
+            except Exception:
+                cache_age = None
+            usage_copy.setdefault('_cache_source', 'cache')
+            usage_copy['_cache_age_seconds'] = cache_age
+            usage_copy['_queried_at'] = queried_at
+            return usage_copy
 
     # Fetch account info for sandbox .claude.json patching
     cursor = db.conn.cursor()
@@ -1340,9 +1396,16 @@ def get_account_usage(db: Database, account_uuid: str, credentials_json: str, fo
 
     # Fetch usage
     usage = ClaudeAPI.get_usage(token)
+    usage.setdefault('_cache_source', 'live')
+    usage['_cache_age_seconds'] = 0.0
+    usage['_queried_at'] = datetime.now(timezone.utc).isoformat()
 
     # Save to database
-    db.add_usage(account_uuid, usage)
+    usage_to_store = copy.deepcopy(usage)
+    usage_to_store.pop('_cache_source', None)
+    usage_to_store.pop('_cache_age_seconds', None)
+    usage_to_store.pop('_queried_at', None)
+    db.add_usage(account_uuid, usage_to_store)
 
     # Update credentials if refreshed
     if refreshed_creds != json.loads(credentials_json):
@@ -1356,130 +1419,294 @@ def get_account_usage(db: Database, account_uuid: str, credentials_json: str, fo
     return usage
 
 
+def _hours_until_reset(reset_iso: Optional[str]) -> float:
+    """Return hours until reset or 168 if unknown, clamped to >=1 minute."""
+    if not reset_iso:
+        return 168.0
+    try:
+        reset_dt = datetime.fromisoformat(reset_iso.replace('Z', '+00:00'))
+        if reset_dt.tzinfo is None:
+            reset_dt = reset_dt.replace(tzinfo=timezone.utc)
+        hours = (reset_dt - datetime.now(timezone.utc)).total_seconds() / 3600.0
+        return max(hours, 1.0 / 60.0)
+    except Exception:
+        return 168.0
+
+
+SIMILAR_DRAIN_THRESHOLD = 0.05  # %/hour margin to consider accounts interchangeable
+STALE_CACHE_SECONDS = 60  # force refresh if cache older than this (seconds)
+HIGH_DRAIN_REFRESH_THRESHOLD = 1.0  # %/hour that warrants a fresh usage pull
+FIVE_HOUR_PENALTIES = [
+    (90.0, 0.5),
+    (80.0, 0.2),
+]
+FIVE_HOUR_ROTATION_CAP = 90.0  # avoid round robin entries above this 5h util
+BURST_THRESHOLD = 94.0  # skip accounts whose expected burst would exceed this
+DEFAULT_BURST_BUFFER = 4.0  # fallback burst size when history is sparse
+
+
+def _load_balancer_state() -> Dict[str, Any]:
+    try:
+        with open(LB_STATE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _store_balancer_state(state: Dict[str, Any]):
+    try:
+        atomic_write_json(LB_STATE_PATH, state)
+    except Exception:
+        pass  # best effort only
+
+
+def _choose_round_robin(candidates: List[Dict]) -> Dict:
+    """Rotate through candidates with similar drain rates using persistent state."""
+    if len(candidates) == 1:
+        return candidates[0]
+
+    min_active = min(c["active_sessions"] for c in candidates)
+    candidates = [c for c in candidates if c["active_sessions"] == min_active]
+
+    min_recent = min(c["recent_sessions"] for c in candidates)
+    candidates = [c for c in candidates if c["recent_sessions"] == min_recent]
+
+    # Stable ordering by account index ensures deterministic rotation
+    candidates.sort(key=lambda c: c["account"]["index_num"])
+
+    state = _load_balancer_state()
+    rr_state = state.setdefault("round_robin", {})
+    window = candidates[0]["window"]
+    last_uuid = rr_state.get(window)
+
+    next_idx = 0
+    if last_uuid:
+        for i, cand in enumerate(candidates):
+            if cand["account"]["uuid"] == last_uuid:
+                next_idx = (i + 1) % len(candidates)
+                break
+
+    selected = candidates[next_idx]
+    rr_state[window] = selected["account"]["uuid"]
+    _store_balancer_state(state)
+    return selected
+
+
+def _log_balancer_candidates(label: str, candidates: List[Dict]):
+    if os.getenv("C2SWITCHER_DEBUG_BALANCER") != "1":
+        return
+    console.print(f"[blue]{label}[/blue]")
+    for cand in candidates:
+        acc = cand["account"]
+        cache_age = cand.get("cache_age_seconds")
+        if isinstance(cache_age, (int, float)) and cache_age is not None:
+            age_str = f"{cache_age:.0f}s"
+        else:
+            age_str = "-"
+        info = (
+            f"- {acc['email']}: tier={cand['tier']} drain={cand['drain_rate']:.3f} adj={cand['adjusted_drain']:.3f} "
+            f"pen={cand['five_hour_penalty']:.2f} util={cand['utilization']:.1f} headroom={cand['headroom']:.1f} "
+            f"burst={cand['expected_burst']:.1f} blocked={int(cand['burst_blocked'])} "
+            f"hours={cand['hours_to_reset']:.1f} five_hour={cand['five_hour_utilization']:.1f} "
+            f"active={cand['active_sessions']} recent={cand['recent_sessions']} "
+            f"cache={cand.get('cache_source', '?')} age={age_str}"
+        )
+        if cand.get("refreshed"):
+            info += " [green](refreshed)[/green]"
+        console.print(info)
+
+
 def select_account_with_load_balancing(db: Database, session_id: Optional[str] = None) -> Optional[Dict]:
-    """
-    Select optimal account using tier-based filtering and load balancing.
-
-    Eligibility tiers (in priority order):
-    1. Tier 1: Opus <90% used (>=10% Opus headroom)
-    2. Tier 2: Opus exhausted, but overall <90% used (>=10% overall headroom)
-    3. Excluded: Any account at 100% on either metric
-
-    Load balancing considers both active sessions AND recent usage (last 5min)
-    for better rate limit distribution, even for short-lived commands.
-
-    Score = utilization + (active_sessions x 15) + (recent_sessions x 5)
-    """
-    # Clean up dead sessions first
+    """Select account prioritizing drain urgency while respecting 99% ceilings."""
     cleanup_dead_sessions(db)
 
-    # If session ID provided, check if already assigned
     if session_id:
         existing = db.get_session_account(session_id)
         if existing:
-            return {
-                "account": existing,
-                "reused": True
-            }
+            try:
+                usage = get_account_usage(db, existing["uuid"], existing["credentials_json"])
+                seven_day_opus = usage.get("seven_day_opus", {}) or {}
+                seven_day = usage.get("seven_day", {}) or {}
+                opus_util = seven_day_opus.get("utilization")
+                overall_util = seven_day.get("utilization")
+                opus_ok = opus_util is None or float(opus_util) < 99
+                overall_ok = overall_util is None or float(overall_util) < 99
+                if opus_ok and overall_ok:
+                    return {"account": existing, "reused": True}
+            except Exception:
+                pass
 
-    # Get all accounts
     accounts = db.get_all_accounts()
     if not accounts:
         return None
 
-    # Fetch usage for all accounts and score them
-    tier1_accounts = []  # Opus available (>10% remaining = <90% used)
-    tier2_accounts = []  # Overall available (>10% remaining = <90% used)
+    candidates: List[Dict[str, Any]] = []
+    burst_cache: Dict[str, float] = {}
 
     for acc in accounts:
-        try:
-            usage = get_account_usage(db, acc["uuid"], acc["credentials_json"])
-            seven_day_opus = usage.get("seven_day_opus", {})
-            seven_day = usage.get("seven_day", {})
+        def build_candidate(usage_data: Dict, refreshed: bool = False) -> Optional[Dict[str, Any]]:
+            five_hour = usage_data.get("five_hour", {}) or {}
+            seven_day_opus = usage_data.get("seven_day_opus", {}) or {}
+            seven_day = usage_data.get("seven_day", {}) or {}
 
-            opus_usage = seven_day_opus.get("utilization") if seven_day_opus else 100
-            overall_usage = seven_day.get("utilization") if seven_day else 100
+            opus_util_raw = seven_day_opus.get("utilization")
+            overall_util_raw = seven_day.get("utilization")
 
-            # Handle None values
-            opus_usage = opus_usage if opus_usage is not None else 100
-            overall_usage = overall_usage if overall_usage is not None else 100
+            opus_util = float(opus_util_raw) if opus_util_raw is not None else 100.0
+            overall_util = float(overall_util_raw) if overall_util_raw is not None else 100.0
 
-            # Exclude accounts at 100% (completely maxed out)
-            if opus_usage >= 100 or overall_usage >= 100:
-                continue
+            if opus_util >= 99.0 and overall_util >= 99.0:
+                return None
 
-            # Count both active sessions AND recent sessions (for rate limiting)
+            if opus_util < 99.0:
+                window = "opus"
+                utilization = opus_util
+                resets_at = seven_day_opus.get("resets_at")
+                tier = 1
+            else:
+                window = "overall"
+                utilization = overall_util
+                resets_at = seven_day.get("resets_at")
+                tier = 2
+
+            hours_to_reset = _hours_until_reset(resets_at)
+            headroom = max(99.0 - utilization, 0.0)
+            drain_rate = headroom / hours_to_reset if headroom > 0 else 0.0
+
+            five_hour_util_raw = five_hour.get("utilization")
+            five_hour_util = float(five_hour_util_raw) if five_hour_util_raw is not None else 0.0
+
             active_sessions = db.count_active_sessions(acc['uuid'])
             recent_sessions = db.count_recent_sessions(acc['uuid'], minutes=5)
 
-            # Session penalties (load balancing weights):
-            # - 15 points per active session: Accounts with active sessions are heavily
-            #   penalized to distribute load and avoid rate limits. A 15-point penalty
-            #   means we prefer accounts with up to 15% more usage over ones with active sessions.
-            # - 5 points per recent session (last 5min): Lighter penalty for rate limiting
-            #   prevention. Distributes burst load without being too aggressive.
-            #
-            # Example: Account A at 50% usage with 2 active sessions (score=80) vs
-            #          Account B at 70% usage with 0 sessions (score=70) -> B is selected.
-            session_penalty = (active_sessions * 15) + (recent_sessions * 5)
+            cache_source = usage_data.get('_cache_source', 'unknown')
+            cache_age = usage_data.get('_cache_age_seconds')
 
-            # Determine tier and calculate score
-            if opus_usage < 90:
-                # Tier 1: Opus available
-                base_score = opus_usage
-                final_score = base_score + session_penalty
-                tier1_accounts.append({
-                    "account": acc,
-                    "tier": 1,
-                    "score": final_score,
-                    "opus_usage": opus_usage,
-                    "overall_usage": overall_usage,
-                    "active_sessions": active_sessions,
-                    "recent_sessions": recent_sessions
-                })
-            elif overall_usage < 90:
-                # Tier 2: Opus exhausted but overall available
-                base_score = overall_usage
-                final_score = base_score + session_penalty
-                tier2_accounts.append({
-                    "account": acc,
-                    "tier": 2,
-                    "score": final_score,
-                    "opus_usage": opus_usage,
-                    "overall_usage": overall_usage,
-                    "active_sessions": active_sessions,
-                    "recent_sessions": recent_sessions
-                })
-            # else: Skip accounts with <10% headroom on both metrics
+            expected_burst = burst_cache.get(acc['uuid'])
+            if expected_burst is None or refreshed:
+                expected_burst = db.get_usage_delta_percentile(acc['uuid'])
+                burst_cache[acc['uuid']] = expected_burst
 
+            burst_blocked = (utilization + expected_burst) >= BURST_THRESHOLD
+
+            five_hour_penalty = 0.0
+            for threshold, penalty in FIVE_HOUR_PENALTIES:
+                if five_hour_util >= threshold:
+                    five_hour_penalty = penalty
+                    break
+
+            adjusted_drain = max(drain_rate - five_hour_penalty, 0.0)
+
+            rank = (
+                adjusted_drain,
+                utilization,
+                -hours_to_reset,
+                -five_hour_util,
+                -active_sessions,
+                -recent_sessions,
+            )
+
+            return {
+                "account": acc,
+                "tier": tier,
+                "rank": rank,
+                "drain_rate": drain_rate,
+                "adjusted_drain": adjusted_drain,
+                "utilization": utilization,
+                "headroom": headroom,
+                "hours_to_reset": hours_to_reset,
+                "five_hour_utilization": five_hour_util,
+                "five_hour_penalty": five_hour_penalty,
+                "expected_burst": expected_burst,
+                "burst_blocked": burst_blocked,
+                "active_sessions": active_sessions,
+                "recent_sessions": recent_sessions,
+                "opus_usage": opus_util,
+                "overall_usage": overall_util,
+                "window": window,
+                "cache_source": cache_source,
+                "cache_age_seconds": cache_age,
+                "refreshed": refreshed,
+            }
+
+        try:
+            usage = get_account_usage(db, acc["uuid"], acc["credentials_json"])
         except Exception as e:
-            # Skip accounts that fail to fetch usage
             console.print(f"[yellow]Warning: Could not fetch usage for {acc['email']}: {e}[/yellow]")
             continue
 
-    # Select from best available tier
-    if tier1_accounts:
-        # Sort by score (lower is better)
-        tier1_accounts.sort(key=lambda x: x['score'])
-        selected = tier1_accounts[0]
-    elif tier2_accounts:
-        tier2_accounts.sort(key=lambda x: x['score'])
-        selected = tier2_accounts[0]
-    else:
-        return None  # No accounts available
+        candidate = build_candidate(usage)
+        if not candidate:
+            continue
 
-    # Assign session to selected account if session_id provided
+        needs_refresh = False
+        cache_source = candidate.get("cache_source")
+        cache_age = candidate.get("cache_age_seconds")
+        if cache_source != "live":
+            if cache_age is not None and cache_age > STALE_CACHE_SECONDS:
+                needs_refresh = True
+            if candidate["drain_rate"] >= HIGH_DRAIN_REFRESH_THRESHOLD and (cache_age is None or cache_age > 10):
+                needs_refresh = True
+
+        if needs_refresh:
+            try:
+                usage = get_account_usage(db, acc["uuid"], acc["credentials_json"], force=True)
+                candidate = build_candidate(usage, refreshed=True)
+                if not candidate:
+                    continue
+            except Exception as e:
+                console.print(f"[yellow]Warning: Refresh failed for {acc['email']}: {e}[/yellow]")
+                # Fall back to stale candidate
+        candidates.append(candidate)
+
+    if not candidates:
+        return None
+
+    usable_candidates = [c for c in candidates if not c["burst_blocked"]]
+    pool = usable_candidates if usable_candidates else candidates
+
+    cool_candidates = [c for c in pool if c["five_hour_utilization"] < FIVE_HOUR_ROTATION_CAP]
+    pool = cool_candidates if cool_candidates else pool
+
+    pool.sort(key=lambda c: c["rank"], reverse=True)
+
+    _log_balancer_candidates("load-balancer candidates", pool)
+
+    top = pool[0]
+    similar = [
+        c for c in pool
+        if c["tier"] == top["tier"]
+        and abs(top["adjusted_drain"] - c["adjusted_drain"]) <= SIMILAR_DRAIN_THRESHOLD
+    ]
+
+    if len(similar) > 1:
+        selected = _choose_round_robin(similar)
+    else:
+        selected = top
+
     if session_id:
         db.assign_session_to_account(session_id, selected['account']['uuid'])
 
     return {
         "account": selected['account'],
         "tier": selected['tier'],
-        "score": selected['score'],
+        "score": selected['rank'],
         "opus_usage": selected['opus_usage'],
         "overall_usage": selected['overall_usage'],
+        "headroom": selected['headroom'],
+        "hours_to_reset": selected['hours_to_reset'],
+        "drain_rate": selected['drain_rate'],
+        "adjusted_drain": selected['adjusted_drain'],
+        "five_hour_penalty": selected['five_hour_penalty'],
+        "five_hour_utilization": selected['five_hour_utilization'],
+        "expected_burst": selected['expected_burst'],
+        "burst_blocked": selected['burst_blocked'],
         "active_sessions": selected['active_sessions'],
-        "recent_sessions": selected.get('recent_sessions', 0),
+        "recent_sessions": selected['recent_sessions'],
+        "cache_source": selected.get('cache_source'),
+        "cache_age_seconds": selected.get('cache_age_seconds'),
+        "refreshed": selected.get('refreshed', False),
         "reused": False
     }
 
@@ -1868,8 +2095,18 @@ def optimal(switch: bool, session_id: Optional[str], token_only: bool):
             f"Overall Usage: {result.get('overall_usage', 0):>3}%"
         )
 
-        if 'score' in result:
-            info_text += f"\n[dim]Load Score: {result['score']:.1f}[/dim]"
+        if 'drain_rate' in result:
+            info_text += f"\n[dim]Drain Rate: {result['drain_rate']:.3f} %/h[/dim]"
+        if 'adjusted_drain' in result and 'five_hour_penalty' in result:
+            info_text += f"\n[dim]Adjusted Drain: {result['adjusted_drain']:.3f} %/h (pen {result['five_hour_penalty']:.2f})[/dim]"
+        if 'headroom' in result:
+            info_text += f"\n[dim]Headroom: {result['headroom']:.1f}%[/dim]"
+        if 'expected_burst' in result:
+            info_text += f"\n[dim]Burst Buffer: {result['expected_burst']:.1f}%[/dim]"
+        if 'five_hour_utilization' in result:
+            info_text += f"\n[dim]5h Utilization: {result['five_hour_utilization']:.1f}%[/dim]"
+        if 'hours_to_reset' in result:
+            info_text += f"\n[dim]Hours to Reset: {result['hours_to_reset']:.1f}[/dim]"
 
         info_text += session_info
 
