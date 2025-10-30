@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import webbrowser
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -534,6 +535,8 @@ def create_visualizations(df: pd.DataFrame, forecasts: Iterable[AccountForecast]
     console.print(f"[bold green]✓[/] Saved visualization to [link=file://{output_path}]{output_path}[/]")
     if output_path.exists():
         console.print(f"[dim]Figure size: {output_path.stat().st_size / 1024:.1f} KiB[/]")
+
+    webbrowser.open(f"file://{output_path.absolute()}")
 
     if show:
         plt.show()
