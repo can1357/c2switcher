@@ -24,7 +24,9 @@ dependencies = [
 [project.scripts]
 c2switcher = "c2switcher.cli:cli"
 
+[tool.setuptools.packages.find]
+where = ["."]
+
 [tool.setuptools]
-packages = ["c2switcher"]
 script-files = ["c2claude"]
 include-package-data = true

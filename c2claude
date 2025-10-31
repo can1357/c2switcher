@@ -38,7 +38,7 @@ PARENT_PID=$PPID
 
 # Cleanup function to end session
 cleanup_session() {
-    c2switcher end-session --session-id "$SESSION_ID" 2>/dev/null || true
+    c2switcher end-session --session-id "$SESSION_ID" 2>/dev/null &
 }
 
 # Register cleanup to run on exit (success or failure)
@@ -119,7 +119,6 @@ fi
 claude "${remaining_args[@]}"
 EXIT_CODE=$?
 
-# Cleanup happens via trap, but also explicitly call it here
-cleanup_session
+# Cleanup happens via trap automatically (backgrounded)
 
 exit $EXIT_CODE
