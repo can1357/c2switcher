@@ -25,7 +25,7 @@ from .utils import atomic_write_json
 
 def _hours_until_reset(reset_iso: Optional[str]) -> float:
     if not reset_iso:
-        return 168.0
+        return 24.0  # Assume 24h for missing reset (favors fresh accounts)
     try:
         reset_dt = datetime.fromisoformat(reset_iso.replace("Z", "+00:00"))
         if reset_dt.tzinfo is None:
@@ -33,7 +33,7 @@ def _hours_until_reset(reset_iso: Optional[str]) -> float:
         hours = (reset_dt - datetime.now(timezone.utc)).total_seconds() / 3600.0
         return max(hours, 1.0 / 60.0)
     except Exception:
-        return 168.0
+        return 24.0  # Assume 24h on error (favors fresh accounts)
 
 
 def _load_balancer_state() -> Dict[str, Any]:
@@ -158,7 +158,7 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
 
             hours_to_reset = _hours_until_reset(resets_at)
             headroom = max(99.0 - utilization, 0.0)
-            drain_rate = headroom / hours_to_reset if headroom > 0 else 0.0
+            drain_rate = headroom / max(hours_to_reset, 0.001) if headroom > 0 else 0.0
 
             five_hour_util_raw = five_hour.get("utilization")
             five_hour_util = float(five_hour_util_raw) if five_hour_util_raw is not None else 0.0
