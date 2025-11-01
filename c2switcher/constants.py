@@ -18,7 +18,8 @@ LB_STATE_PATH = C2SWITCHER_DIR / "load_balancer_state.json"
 
 # Load balancer tuning parameters
 SIMILAR_DRAIN_THRESHOLD = 0.05  # %/hour margin to consider accounts interchangeable
-STALE_CACHE_SECONDS = 60  # force refresh if cache older than this (seconds)
+CACHE_TTL_SECONDS = 300  # accept cache up to this age (5 minutes)
+STALE_CACHE_SECONDS = 60  # refresh stale cache if needed (for high-drain accounts)
 HIGH_DRAIN_REFRESH_THRESHOLD = 1.0  # %/hour that warrants a fresh usage pull
 FIVE_HOUR_PENALTIES = [
     (90.0, 0.5),

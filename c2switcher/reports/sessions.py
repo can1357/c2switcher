@@ -5,15 +5,17 @@ from __future__ import annotations
 import sqlite3
 import webbrowser
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from rich import box
+from rich.columns import Columns
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -88,58 +90,200 @@ def load_sessions(db_path: Path, min_duration_sec: int, days: int) -> pd.DataFra
 
     # Convert UTC timestamps to local timezone for accurate hour/weekday analysis
     local_tz = datetime.now().astimezone().tzinfo
-    df["created_at"] = pd.to_datetime(df["created_at"], utc=True).dt.tz_convert(local_tz).dt.tz_localize(None)
-    df["ended_at"] = pd.to_datetime(df["ended_at"], utc=True).dt.tz_convert(local_tz).dt.tz_localize(None)
-    df["duration_min"] = (df["ended_at"] - df["created_at"]).dt.total_seconds() / 60
+    created_at = pd.to_datetime(df["created_at"], utc=True).dt.tz_convert(local_tz).dt.tz_localize(None)
+    ended_at = pd.to_datetime(df["ended_at"], utc=True).dt.tz_convert(local_tz).dt.tz_localize(None)
+
+    df = df.assign(
+        created_at=created_at,
+        ended_at=ended_at,
+        duration_min=(ended_at - created_at).dt.total_seconds() / 60,
+    )
+
     df = df[df["duration_min"] >= min_duration_sec / 60]
 
     if days > 0:
         cutoff = datetime.now() - timedelta(days=days)
         df = df[df["created_at"] >= cutoff]
 
-    df["project"] = df["cwd"].apply(extract_project)
-    df["account"] = df["nickname"].fillna(df["display_name"]).fillna("unknown")
-    df["date"] = df["created_at"].dt.date
-    df["hour"] = df["created_at"].dt.hour
-    df["weekday"] = df["created_at"].dt.day_name()
+    df = df.assign(
+        project=df["cwd"].apply(extract_project),
+        account=df["nickname"].fillna(df["display_name"]).fillna("unknown"),
+        date=df["created_at"].dt.date,
+        hour=df["created_at"].dt.hour,
+        weekday=df["created_at"].dt.day_name(),
+    )
 
     return df
 
 
-def summarize_high_level(df: pd.DataFrame) -> Panel:
+def format_relative_time(moment: Optional[datetime]) -> str:
+    if moment is None:
+        return "—"
+    delta = datetime.now() - moment
+    seconds = max(0, int(delta.total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s ago"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    days = hours // 24
+    if days < 14:
+        return f"{days}d ago"
+    weeks = days // 7
+    if weeks < 8:
+        return f"{weeks}w ago"
+    months = days // 30
+    if months < 18:
+        return f"{months}mo ago"
+    years = days // 365
+    return f"{years}y ago"
+
+
+@dataclass
+class SessionMetrics:
+    total_sessions: int
+    total_hours: float
+    total_minutes: float
+    unique_projects: int
+    unique_accounts: int
+    span_days: int
+    avg_daily_hours: float
+    median_session_min: float
+    longest_project: str
+    longest_account: str
+    longest_minutes: float
+    first_session: datetime
+    last_session: datetime
+    recent_hours: float
+    recent_sessions: int
+    recent_projects: List[tuple[str, int]]
+    busiest_hour: Optional[int]
+    busiest_day: Optional[str]
+
+
+def compute_session_metrics(df: pd.DataFrame) -> SessionMetrics:
+    total_minutes = float(df["duration_min"].sum())
+    total_hours = total_minutes / 60
     total_sessions = len(df)
-    total_hours = df["duration_min"].sum() / 60
     unique_projects = df["project"].nunique()
     unique_accounts = df["account"].nunique()
-    span_days = (df["created_at"].max().date() - df["created_at"].min().date()).days + 1
-    avg_daily_hours = total_hours / span_days if span_days > 0 else 0
-    median_session = df["duration_min"].median()
-    longest = df.nlargest(1, "duration_min").iloc[0]
-    longest_desc = f"{longest['project']} · {longest['duration_min']:.0f} min ({longest['account']})"
+    first_session = df["created_at"].min()
+    last_session = df["created_at"].max()
+    span_days = max(1, (last_session.date() - first_session.date()).days + 1)
+    avg_daily_hours = total_hours / span_days if span_days else 0.0
+    median_session = float(df["duration_min"].median()) if total_sessions else 0.0
+    longest_idx = df["duration_min"].idxmax()
+    longest_row = df.loc[longest_idx]
+    longest_project = longest_row["project"]
+    longest_account = longest_row["account"]
+    longest_minutes = float(longest_row["duration_min"])
 
-    body = (
-        f"[bold]{total_sessions}[/] sessions · "
-        f"[bold]{total_hours:.1f}[/] hrs total · "
-        f"{unique_projects} projects · "
-        f"{unique_accounts} accounts\n"
-        f"Span: {span_days} days · Avg day: {avg_daily_hours:.1f}h · "
-        f"Median session: {median_session:.0f} min\n"
-        f"Longest session: {longest_desc}"
+    recent_window = last_session - timedelta(days=7)
+    recent_df = df[df["created_at"] >= recent_window]
+    recent_hours = recent_df["duration_min"].sum() / 60 if not recent_df.empty else 0.0
+    recent_sessions = int(recent_df["session_id"].nunique()) if not recent_df.empty else 0
+    recent_projects = Counter(recent_df["project"]).most_common(3) if not recent_df.empty else []
+
+    busiest_hour = (
+        int(df.groupby("hour")["duration_min"].sum().idxmax()) if total_sessions else None
     )
-    return Panel(body, title="Session Overview", border_style="cyan", box=box.ROUNDED)
+    day_totals = df.groupby("weekday")["duration_min"].sum().sort_values(ascending=False)
+    busiest_day = day_totals.index[0] if not day_totals.empty else None
+
+    return SessionMetrics(
+        total_sessions=total_sessions,
+        total_hours=total_hours,
+        total_minutes=total_minutes,
+        unique_projects=unique_projects,
+        unique_accounts=unique_accounts,
+        span_days=span_days,
+        avg_daily_hours=avg_daily_hours,
+        median_session_min=median_session,
+        longest_project=longest_project,
+        longest_account=longest_account,
+        longest_minutes=longest_minutes,
+        first_session=first_session,
+        last_session=last_session,
+        recent_hours=recent_hours,
+        recent_sessions=recent_sessions,
+        recent_projects=recent_projects,
+        busiest_hour=busiest_hour,
+        busiest_day=busiest_day,
+    )
 
 
-def top_projects_table(df: pd.DataFrame) -> Table:
-    top_projects = (
+def activity_snapshot_panel(metrics: SessionMetrics) -> Panel:
+    lines = [
+        f"[bold]{metrics.total_sessions}[/] sessions across {metrics.span_days} day(s)",
+        f"Focus time: [bold]{metrics.total_hours:.1f}h[/] ({metrics.avg_daily_hours:.1f}h/day)",
+        f"Projects: {metrics.unique_projects} • Accounts: {metrics.unique_accounts}",
+        f"Median session: {metrics.median_session_min:.0f}m • Longest: {metrics.longest_minutes:.0f}m "
+        f"({metrics.longest_project}, {metrics.longest_account})",
+        f"First session: {metrics.first_session:%Y-%m-%d} ({format_relative_time(metrics.first_session)})",
+        f"Latest session: {metrics.last_session:%Y-%m-%d %H:%M} ({format_relative_time(metrics.last_session)})",
+    ]
+    if metrics.busiest_hour is not None:
+        lines.append(f"Peak hour: {metrics.busiest_hour:02d}:00")
+    if metrics.busiest_day:
+        lines.append(f"Loudest day: {metrics.busiest_day}")
+    return Panel("\n".join(lines), title="Activity Snapshot", border_style="cyan", box=box.ROUNDED)
+
+
+def project_cards(df: pd.DataFrame, limit: int = 6) -> Columns | Panel:
+    project_stats = (
         df.groupby("project")
         .agg(
-            hours=("duration_min", lambda s: s.sum() / 60),
-            share=("duration_min", lambda s: s.sum() / df["duration_min"].sum()),
+            minutes=("duration_min", "sum"),
             sessions=("session_id", "count"),
             median_min=("duration_min", "median"),
             avg_min=("duration_min", "mean"),
+            last_seen=("created_at", "max"),
+            accounts=("account", "nunique"),
         )
-        .sort_values("hours", ascending=False)
+        .sort_values("minutes", ascending=False)
+    )
+
+    if project_stats.empty:
+        return Panel("No project activity recorded.", title="Project Highlights", border_style="magenta", box=box.ROUNDED)
+
+    total_minutes = project_stats["minutes"].sum()
+    cards = []
+    for project, row in project_stats.head(limit).iterrows():
+        share = row["minutes"] / total_minutes if total_minutes else 0
+        if share >= 0.35:
+            border = "magenta"
+        elif share >= 0.18:
+            border = "green"
+        else:
+            border = "cyan"
+        lines = [
+            f"[bold]{project}[/]",
+            f"{row['minutes'] / 60:.1f}h total ({share * 100:.0f}%)",
+            f"{int(row['sessions'])} session(s) • {int(row['accounts'])} account(s)",
+            f"Median {row['median_min']:.0f}m • Avg {row['avg_min']:.0f}m",
+            f"Last active {format_relative_time(row['last_seen'])}",
+        ]
+        cards.append(Panel("\n".join(lines), border_style=border, box=box.ROUNDED, padding=(0, 1)))
+
+    columns = Columns(cards, expand=True, equal=True)
+    return Panel(columns, title="Project Highlights", border_style="magenta", box=box.ROUNDED)
+
+
+def project_detail_table(df: pd.DataFrame) -> Table:
+    totals = df["duration_min"].sum()
+    project_stats = (
+        df.groupby("project")
+        .agg(
+            minutes=("duration_min", "sum"),
+            sessions=("session_id", "count"),
+            median_min=("duration_min", "median"),
+            avg_min=("duration_min", "mean"),
+            accounts=("account", "nunique"),
+        )
+        .sort_values("minutes", ascending=False)
         .head(10)
     )
 
@@ -155,36 +299,43 @@ def top_projects_table(df: pd.DataFrame) -> Table:
     table.add_column("Sessions", justify="right")
     table.add_column("Median", justify="right")
     table.add_column("Avg", justify="right")
+    table.add_column("Accounts", justify="right")
 
-    for idx, row in top_projects.iterrows():
+    for project, row in project_stats.iterrows():
+        share = (row["minutes"] / totals * 100) if totals else 0
         table.add_row(
-            idx,
-            f"{row['hours']:.1f}",
-            f"{row['share'] * 100:5.1f}%",
+            project,
+            f"{row['minutes'] / 60:.1f}",
+            f"{share:4.1f}%",
             f"{int(row['sessions'])}",
             f"{row['median_min']:.0f}m",
             f"{row['avg_min']:.0f}m",
+            f"{int(row['accounts'])}",
         )
     return table
 
 
-def productive_hours_table(df: pd.DataFrame) -> Table:
+def focus_windows_table(df: pd.DataFrame) -> Table:
+    totals = df["duration_min"].sum()
     hour_stats = (
         df.groupby("hour")["duration_min"].sum().reindex(range(24), fill_value=0).sort_values(ascending=False)
     )
     top_hours = hour_stats.head(6)
+
     table = Table(
         title="Peak Focus Windows",
         box=box.SIMPLE_HEAVY,
         pad_edge=False,
     )
     table.add_column("Hour", justify="center")
-    table.add_column("Total Time", justify="right")
+    table.add_column("Hours", justify="right")
+    table.add_column("Share", justify="right")
     table.add_column("Sessions", justify="right")
     table.add_column("Signature Project", justify="left")
 
     for hour, minutes in top_hours.items():
-        sessions = len(df[df["hour"] == hour])
+        share = (minutes / totals * 100) if totals else 0
+        sessions = int((df["hour"] == hour).sum())
         project = (
             df[df["hour"] == hour]
             .groupby("project")["duration_min"]
@@ -195,7 +346,8 @@ def productive_hours_table(df: pd.DataFrame) -> Table:
         project_name = project.index[0] if not project.empty else "—"
         table.add_row(
             f"{hour:02d}:00",
-            f"{minutes/60:.1f}h",
+            f"{minutes / 60:.1f}h",
+            f"{share:4.1f}%",
             str(sessions),
             project_name,
         )
@@ -203,14 +355,15 @@ def productive_hours_table(df: pd.DataFrame) -> Table:
 
 
 def account_mix_table(df: pd.DataFrame) -> Table:
+    totals = df["duration_min"].sum()
     account_stats = (
         df.groupby("account")
         .agg(
-            hours=("duration_min", lambda s: s.sum() / 60),
+            minutes=("duration_min", "sum"),
             sessions=("session_id", "count"),
             unique_projects=("project", "nunique"),
         )
-        .sort_values("hours", ascending=False)
+        .sort_values("minutes", ascending=False)
     )
 
     table = Table(
@@ -220,64 +373,91 @@ def account_mix_table(df: pd.DataFrame) -> Table:
     )
     table.add_column("Account", style="bold")
     table.add_column("Hours", justify="right")
+    table.add_column("Share", justify="right")
     table.add_column("Sessions", justify="right")
     table.add_column("Projects", justify="right")
-    table.add_column("Longest Session", justify="right")
+    table.add_column("Focus Anchor", justify="left")
 
-    for acc, row in account_stats.iterrows():
-        longest = df[df["account"] == acc]["duration_min"].max()
+    for account, row in account_stats.iterrows():
+        minutes = row["minutes"]
+        share = (minutes / totals * 100) if totals else 0
+        account_df = df[df["account"] == account]
+        focus_project = (
+            account_df.groupby("project")["duration_min"].sum().sort_values(ascending=False).head(1)
+        )
+        focus_name = focus_project.index[0] if not focus_project.empty else "—"
         table.add_row(
-            acc,
-            f"{row['hours']:.1f}",
-            str(int(row["sessions"])),
-            str(int(row["unique_projects"])),
-            f"{longest:.0f}m",
+            account,
+            f"{minutes / 60:.1f}",
+            f"{share:4.1f}%",
+            f"{int(row['sessions'])}",
+            f"{int(row['unique_projects'])}",
+            focus_name,
         )
     return table
 
 
-def recent_context_panel(df: pd.DataFrame) -> Panel:
-    window = df["created_at"].max() - timedelta(days=7)
-    last_week = df[df["created_at"] >= window]
-    if last_week.empty:
+def momentum_panel(df: pd.DataFrame, metrics: SessionMetrics) -> Panel:
+    if metrics.recent_sessions == 0:
         body = "No sessions recorded in the last 7 days."
     else:
-        hours = last_week["duration_min"].sum() / 60
-        sessions = last_week["session_id"].nunique()
-        projects = last_week["project"].value_counts()
-        top_projects = (projects / projects.sum() * 100).round().astype(int).head(3)
+        per_day = metrics.recent_hours / 7
         project_summary = ", ".join(
-            f"[bold]{name}[/] ({pct}%)" for name, pct in top_projects.items()
+            f"[bold]{name}[/] ({count}×)" for name, count in metrics.recent_projects
         )
         body = (
-            f"Last 7 days: [bold]{hours:.1f}[/] hrs across {sessions} sessions\n"
-            f"Top projects: {project_summary}"
+            f"Last 7 days: [bold]{metrics.recent_hours:.1f}[/] hrs "
+            f"({metrics.recent_sessions} sessions, {per_day:.1f}h/day)\n"
+            f"Top projects: {project_summary if project_summary else '—'}"
         )
     return Panel(body, title="Recent Momentum", border_style="magenta", box=box.ROUNDED)
 
 
-def recommend_actions(df: pd.DataFrame) -> Panel:
+def recommendations_panel(df: pd.DataFrame, metrics: SessionMetrics) -> Panel:
+    lines: List[str] = []
     latest_sessions = df.sort_values("created_at", ascending=False).head(5)
-    lines = []
     if not latest_sessions.empty:
         recent_projects = Counter(latest_sessions["project"])
-        fav = recent_projects.most_common(1)[0][0]
+        fav, count = recent_projects.most_common(1)[0]
         lines.append(
-            f"Maintain momentum on [bold]{fav}[/] — it featured in {recent_projects[fav]} "
-            "of your last 5 sessions."
+            f"Keep momentum on [bold]{fav}[/] — {count} of your last {len(latest_sessions)} sessions touched it."
         )
 
-    busiest_hour = df.groupby("hour")["duration_min"].sum().idxmax()
-    lines.append(f"Your peak focus hour is [bold]{busiest_hour:02d}:00[/]; consider protecting that time window.")
+    if metrics.busiest_hour is not None:
+        lines.append(
+            f"Protect {metrics.busiest_hour:02d}:00 — it consistently delivers the densest focus blocks."
+        )
+    if metrics.busiest_day:
+        lines.append(f"Schedule deep work on {metrics.busiest_day}s; they capture the most total minutes.")
 
-    if df["duration_min"].mean() < 45:
-        lines.append("Average session length is under 45 minutes; batching tasks might reduce context-switching.")
+    if metrics.median_session_min < 45:
+        lines.append(
+            "Median session is under 45 minutes — consider batching similar work to limit context switches."
+        )
+    if metrics.unique_projects > 8:
+        lines.append("High project spread detected — archive or cluster low-priority projects to regain focus.")
+    if metrics.longest_minutes > 180:
+        lines.append(
+            "Frequent >3h sessions. Block recovery time afterwards to avoid burnout."
+        )
 
-    if df["project"].nunique() > 8:
-        lines.append("High project count detected — consider archiving or batching related projects to keep focus.")
+    project_totals = df.groupby("project")["duration_min"].sum().sort_values(ascending=False)
+    total_minutes = project_totals.sum()
+    if total_minutes > 0:
+        project_share = project_totals / total_minutes
+    else:
+        project_share = pd.Series(dtype=float)
+    if not project_share.empty and project_share.iloc[0] >= 0.6:
+        lines.append(
+            f"[bold]{project_share.index[0]}[/] accounts for {project_share.iloc[0]*100:.0f}% of focus time — "
+            "consider spreading risk to a secondary project."
+        )
 
-    body = "\n".join(f"- {line}" for line in lines) if lines else "No strong action items detected."
-    return Panel(body, title="Quick Recommendations", border_style="yellow", box=box.ROUNDED)
+    if not lines:
+        lines.append("No critical adjustments surfaced. Keep the current rhythm.")
+
+    body = "\n".join(f"- {line}" for line in lines)
+    return Panel(body, title="Playbook", border_style="yellow", box=box.ROUNDED)
 
 
 def create_visualizations(df: pd.DataFrame, output_path: Path, days: int, show: bool) -> None:
@@ -319,7 +499,14 @@ def create_visualizations(df: pd.DataFrame, output_path: Path, days: int, show: 
     weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     pivot = (
         df.assign(weekday=pd.Categorical(df["weekday"], categories=weekdays, ordered=True))
-        .pivot_table(index="weekday", columns="hour", values="duration_min", aggfunc="sum", fill_value=0)
+        .pivot_table(
+            index="weekday",
+            columns="hour",
+            values="duration_min",
+            aggfunc="sum",
+            fill_value=0,
+            observed=False,
+        )
         .reindex(weekdays)
         .fillna(0)
     )
@@ -380,18 +567,21 @@ def generate_session_report(
         console.print("[yellow]No sessions found that match the filters.[/]")
         return
 
-    console.print(summarize_high_level(df))
+    metrics = compute_session_metrics(df)
+
+    console.print(activity_snapshot_panel(metrics))
     console.print()
-    console.print(top_projects_table(df))
+    console.print(project_cards(df))
     console.print()
-    console.print(productive_hours_table(df))
+    console.print(project_detail_table(df))
+    console.print()
+    console.print(focus_windows_table(df))
     console.print()
     console.print(account_mix_table(df))
     console.print()
-    console.print(recent_context_panel(df))
+    console.print(momentum_panel(df, metrics))
     console.print()
-    console.print(recommend_actions(df))
+    console.print(recommendations_panel(df, metrics))
 
     console.print("\n[bold cyan]Generating visualization…[/]")
     create_visualizations(df, output_path, days, show)
-

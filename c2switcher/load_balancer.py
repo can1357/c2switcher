@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -10,8 +11,10 @@ from typing import Any, Dict, List, Optional
 
 from filelock import FileLock
 
+from .api import ClaudeAPI
 from .constants import (
     BURST_THRESHOLD,
+    CACHE_TTL_SECONDS,
     FIVE_HOUR_PENALTIES,
     FIVE_HOUR_ROTATION_CAP,
     FRESH_ACCOUNT_MAX_BONUS,
@@ -24,6 +27,7 @@ from .constants import (
 )
 from .database import Database
 from .sessions import cleanup_dead_sessions
+from .tokens import refresh_token
 from .usage import get_account_usage
 from .utils import atomic_write_json
 
@@ -118,7 +122,22 @@ def _log_balancer_candidates(label: str, candidates: List[Dict]):
 
 
 def select_account_with_load_balancing(db: Database, session_id: Optional[str] = None) -> Optional[Dict]:
-    cleanup_dead_sessions(db)
+    # Skip expensive session cleanup if called recently (< 30s ago)
+    import time
+    from pathlib import Path
+    cleanup_marker = Path.home() / ".c2switcher" / ".last_cleanup"
+    now = time.time()
+    should_cleanup = True
+    if cleanup_marker.exists():
+        try:
+            last_cleanup = cleanup_marker.stat().st_mtime
+            if now - last_cleanup < 30:
+                should_cleanup = False
+        except Exception:
+            pass
+    if should_cleanup:
+        cleanup_dead_sessions(db)
+        cleanup_marker.touch(exist_ok=True)
 
     if session_id:
         existing = db.get_session_account(session_id)
@@ -238,21 +257,22 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
         }
 
     # Check cache in main thread first
-    import copy
     accounts_to_fetch = []
     cached_usage = {}
 
     for acc in accounts:
-        cached = db.get_recent_usage(acc["uuid"], max_age_seconds=300)
+        cached = db.get_recent_usage(acc["uuid"], max_age_seconds=CACHE_TTL_SECONDS)
         if cached:
             usage, queried_at = cached
-            usage_copy = copy.deepcopy(usage)
             cache_age = None
             try:
                 cache_dt = datetime.fromisoformat(queried_at.replace("Z", "+00:00"))
                 cache_age = max((datetime.now(timezone.utc) - cache_dt).total_seconds(), 0)
             except Exception:
                 cache_age = None
+
+            # Use cache if within TTL (already checked by get_recent_usage)
+            usage_copy = copy.deepcopy(usage)
             usage_copy.setdefault("_cache_source", "cache")
             usage_copy["_cache_age_seconds"] = cache_age
             usage_copy["_queried_at"] = queried_at
@@ -264,8 +284,6 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
     def fetch_from_api(acc: Dict) -> Dict:
         """Pure HTTP fetch - zero DB access."""
         try:
-            from .tokens import refresh_token
-            from .api import ClaudeAPI
             refreshed_creds = refresh_token(acc["credentials_json"])
             token = refreshed_creds.get("claudeAiOauth", {}).get("accessToken")
             if not token:
@@ -296,6 +314,7 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
     # Process all accounts (cached + fetched) in main thread
     for acc in accounts:
         usage = None
+        was_just_fetched = False
 
         # Get from cache or fetched results
         if acc["uuid"] in cached_usage:
@@ -303,6 +322,7 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
         elif acc["uuid"] in fetched_usage:
             result = fetched_usage[acc["uuid"]]
             usage = result["usage"]
+            was_just_fetched = True
 
             # Store fresh data in DB (main thread)
             usage_to_store = copy.deepcopy(usage)
@@ -329,14 +349,16 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
         if not candidate:
             continue
 
+        # Skip refresh if we just fetched fresh data
         needs_refresh = False
-        cache_source = candidate.get("cache_source")
-        cache_age = candidate.get("cache_age_seconds")
-        if cache_source != "live":
-            if cache_age is not None and cache_age > STALE_CACHE_SECONDS:
-                needs_refresh = True
-            if candidate["priority_drain"] >= HIGH_DRAIN_REFRESH_THRESHOLD and (cache_age is None or cache_age > 10):
-                needs_refresh = True
+        if not was_just_fetched:
+            cache_source = candidate.get("cache_source")
+            cache_age = candidate.get("cache_age_seconds")
+            if cache_source != "live":
+                if cache_age is not None and cache_age > STALE_CACHE_SECONDS:
+                    needs_refresh = True
+                if candidate["priority_drain"] >= HIGH_DRAIN_REFRESH_THRESHOLD and (cache_age is None or cache_age > 10):
+                    needs_refresh = True
 
         if needs_refresh:
             try:
