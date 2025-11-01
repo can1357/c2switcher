@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 import webbrowser
 from collections import Counter
@@ -328,6 +329,76 @@ def quick_recos_panel(forecasts: Iterable[AccountForecast]) -> Panel:
     return Panel(body, title="Playbook", border_style="cyan", box=box.ROUNDED)
 
 
+def fleet_capacity_panel(forecasts: Iterable[AccountForecast]) -> Panel:
+    forecasts = list(forecasts)
+    if not forecasts:
+        return Panel(
+            "[dim]No accounts available to assess capacity.[/]",
+            title="Fleet Capacity",
+            border_style="magenta",
+            box=box.ROUNDED,
+        )
+
+    per_account_capacity = 100 / (7 * 24)
+
+    total_rate_7d = sum(max(f.rate_7d, 0.0) for f in forecasts)
+    total_rate_opus = sum(max(f.rate_opus, 0.0) for f in forecasts)
+
+    def required_accounts(total_rate: float) -> int:
+        if total_rate <= 0:
+            return 0
+        return max(1, math.ceil(total_rate / per_account_capacity))
+
+    required_overall = required_accounts(total_rate_7d)
+    required_opus = required_accounts(total_rate_opus)
+    recommended_fleet = max(required_overall, required_opus)
+
+    at_risk_accounts = [f for f in forecasts if f.hits_7d_before_reset or f.hits_opus_before_reset]
+    projected_available = len(forecasts) - len(at_risk_accounts)
+    projected_shortfall = max(0, recommended_fleet - projected_available)
+
+    limit_horizons = [
+        f.first_limit_hours
+        for f in forecasts
+        if f.first_limit_type and f.first_limit_hours != float("inf")
+    ]
+    soonest_limit = min(limit_horizons) if limit_horizons else None
+
+    lines = [f"[bold]Accounts on roster:[/] {len(forecasts)}"]
+
+    if total_rate_7d > 0:
+        lines.append(f"7d Sonnet burn: {total_rate_7d:.2f}%/h → needs {required_overall} account(s)")
+    else:
+        lines.append("7d Sonnet burn: [dim]idle[/dim]")
+
+    if total_rate_opus > 0:
+        lines.append(f"7d Opus burn: {total_rate_opus:.2f}%/h → needs {required_opus} account(s)")
+    else:
+        lines.append("7d Opus burn: [dim]idle[/dim]")
+
+    if recommended_fleet > 0:
+        lines.append(f"[bold]Recommended fleet size:[/] {recommended_fleet} account(s)")
+
+    if len(forecasts) >= recommended_fleet:
+        headroom = len(forecasts) - recommended_fleet
+        lines.append(f"Current headroom: {headroom} account(s)")
+    else:
+        lines.append(f"[red]Shortfall today:[/] add {recommended_fleet - len(forecasts)} account(s)")
+
+    if at_risk_accounts:
+        lines.append(
+            f"Projected drop-offs: {len(at_risk_accounts)} account(s) hit limits before reset "
+            f"({format_horizon(soonest_limit)} earliest)."
+        )
+        if projected_shortfall > 0:
+            lines.append(f"[yellow]Action:[/] secure {projected_shortfall} additional account(s) soon.")
+    else:
+        lines.append("No accounts expected to cap before their resets.")
+
+    body = "\n".join(lines)
+    return Panel(body, title="Fleet Capacity", border_style="magenta", box=box.ROUNDED)
+
+
 def create_visualizations(df: pd.DataFrame, forecasts: Iterable[AccountForecast], output_path: Path, show: bool) -> None:
     forecasts = list(forecasts)
     plt.style.use("seaborn-v0_8")
@@ -600,10 +671,11 @@ def generate_usage_report(
 
     console.print(overall_status_panel(forecasts))
     console.print()
+    console.print(fleet_capacity_panel(forecasts))
+    console.print()
     console.print(accounts_table(forecasts))
     console.print()
     console.print(quick_recos_panel(forecasts))
 
     console.print("\n[bold cyan]Building visualization…[/]")
     create_visualizations(df, forecasts, output_path, show)
-

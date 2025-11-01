@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+from filelock import FileLock
 
 from .constants import (
     BURST_THRESHOLD,
@@ -33,7 +36,6 @@ def _hours_until_reset(reset_iso: Optional[str]) -> float:
         if reset_dt.tzinfo is None:
             reset_dt = reset_dt.replace(tzinfo=timezone.utc)
         hours = (reset_dt - datetime.now(timezone.utc)).total_seconds() / 3600.0
-        # If reset is in past, return 0.1 hours (high urgency) instead of clamping to 1 minute
         if hours < 0:
             return 0.1
         return max(hours, 1.0 / 60.0)
@@ -69,25 +71,28 @@ def _choose_round_robin(candidates: List[Dict]) -> Dict:
 
     candidates.sort(key=lambda c: c["account"]["index_num"])
 
-    state = _load_balancer_state()
-    rr_state = state.setdefault("round_robin", {})
-    window = candidates[0]["window"]
-    last_uuid = rr_state.get(window)
+    lock_path = str(LB_STATE_PATH) + ".lock"
+    with FileLock(lock_path, timeout=5):
+        state = _load_balancer_state()
+        rr_state = state.setdefault("round_robin", {})
+        window = candidates[0]["window"]
+        last_uuid = rr_state.get(window)
 
-    next_idx = 0
-    if last_uuid:
         candidate_uuids = [c["account"]["uuid"] for c in candidates]
-        if last_uuid not in candidate_uuids:
+        if last_uuid and last_uuid not in candidate_uuids:
             last_uuid = None
-        else:
+            rr_state[window] = None
+
+        next_idx = 0
+        if last_uuid:
             for idx, cand in enumerate(candidates):
                 if cand["account"]["uuid"] == last_uuid:
                     next_idx = (idx + 1) % len(candidates)
                     break
 
-    selected = candidates[next_idx]
-    rr_state[window] = selected["account"]["uuid"]
-    _store_balancer_state(state)
+        selected = candidates[next_idx]
+        rr_state[window] = selected["account"]["uuid"]
+        _store_balancer_state(state)
     return selected
 
 
@@ -101,7 +106,7 @@ def _log_balancer_candidates(label: str, candidates: List[Dict]):
         age_str = f"{cache_age:.0f}s" if isinstance(cache_age, (int, float)) and cache_age is not None else "-"
         info = (
             f"- {acc['email']}: tier={cand['tier']} drain={cand['drain_rate']:.3f} adj={cand['adjusted_drain']:.3f} "
-            f"bonus={cand['fresh_bonus']:.2f} pen={cand['five_hour_penalty']:.2f} util={cand['utilization']:.1f} "
+            f"bonus={cand['fresh_bonus']:.2f} factor={cand['five_hour_factor']:.2f} util={cand['utilization']:.1f} "
             f"headroom={cand['headroom']:.1f} burst={cand['expected_burst']:.1f} "
             f"blocked={int(cand['burst_blocked'])} hours={cand['hours_to_reset']:.1f} "
             f"five_hour={cand['five_hour_utilization']:.1f} active={cand['active_sessions']} "
@@ -138,109 +143,124 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
     candidates: List[Dict[str, Any]] = []
     burst_cache: Dict[str, float] = {}
 
-    for acc in accounts:
+    def build_candidate(acc: Dict, usage_data: Dict, refreshed: bool = False) -> Optional[Dict[str, Any]]:
+        five_hour = usage_data.get("five_hour", {}) or {}
+        seven_day_opus = usage_data.get("seven_day_opus", {}) or {}
+        seven_day = usage_data.get("seven_day", {}) or {}
 
-        def build_candidate(usage_data: Dict, refreshed: bool = False) -> Optional[Dict[str, Any]]:
-            five_hour = usage_data.get("five_hour", {}) or {}
-            seven_day_opus = usage_data.get("seven_day_opus", {}) or {}
-            seven_day = usage_data.get("seven_day", {}) or {}
+        opus_util_raw = seven_day_opus.get("utilization")
+        overall_util_raw = seven_day.get("utilization")
 
-            opus_util_raw = seven_day_opus.get("utilization")
-            overall_util_raw = seven_day.get("utilization")
+        opus_util = float(opus_util_raw) if opus_util_raw is not None else 100.0
+        overall_util = float(overall_util_raw) if overall_util_raw is not None else 100.0
 
-            opus_util = float(opus_util_raw) if opus_util_raw is not None else 100.0
-            overall_util = float(overall_util_raw) if overall_util_raw is not None else 100.0
+        if opus_util >= 99.0 and overall_util >= 99.0:
+            return None
 
-            if opus_util >= 99.0 and overall_util >= 99.0:
-                return None
+        if opus_util < 99.0:
+            window = "opus"
+            utilization = opus_util
+            resets_at = seven_day_opus.get("resets_at")
+            tier = 1
+        else:
+            window = "overall"
+            utilization = overall_util
+            resets_at = seven_day.get("resets_at")
+            tier = 2
 
-            if opus_util < 99.0:
-                window = "opus"
-                utilization = opus_util
-                resets_at = seven_day_opus.get("resets_at")
-                tier = 1
-            else:
-                window = "overall"
-                utilization = overall_util
-                resets_at = seven_day.get("resets_at")
-                tier = 2
+        hours_to_reset = _hours_until_reset(resets_at)
+        headroom = max(99.0 - utilization, 0.0)
+        drain_rate = headroom / max(hours_to_reset, 0.001) if headroom > 0 else 0.0
 
-            hours_to_reset = _hours_until_reset(resets_at)
-            headroom = max(99.0 - utilization, 0.0)
-            drain_rate = headroom / max(hours_to_reset, 0.001) if headroom > 0 else 0.0
+        fresh_bonus = 0.0
+        if headroom > 0 and utilization < FRESH_UTILIZATION_THRESHOLD:
+            freshness = (FRESH_UTILIZATION_THRESHOLD - utilization) / FRESH_UTILIZATION_THRESHOLD
+            fresh_bonus = freshness * FRESH_ACCOUNT_MAX_BONUS
 
-            fresh_bonus = 0.0
-            if headroom > 0 and utilization < FRESH_UTILIZATION_THRESHOLD:
-                freshness = (FRESH_UTILIZATION_THRESHOLD - utilization) / FRESH_UTILIZATION_THRESHOLD
-                fresh_bonus = freshness * FRESH_ACCOUNT_MAX_BONUS
+        priority_drain = drain_rate + fresh_bonus
 
-            priority_drain = drain_rate + fresh_bonus
+        five_hour_util_raw = five_hour.get("utilization")
+        five_hour_util = float(five_hour_util_raw) if five_hour_util_raw is not None else 50.0
 
-            five_hour_util_raw = five_hour.get("utilization")
-            five_hour_util = float(five_hour_util_raw) if five_hour_util_raw is not None else 0.0
+        active_sessions = db.count_active_sessions(acc["uuid"])
+        recent_sessions = db.count_recent_sessions(acc["uuid"], minutes=5)
 
-            active_sessions = db.count_active_sessions(acc["uuid"])
-            recent_sessions = db.count_recent_sessions(acc["uuid"], minutes=5)
+        cache_source = usage_data.get("_cache_source", "unknown")
+        cache_age = usage_data.get("_cache_age_seconds")
 
-            cache_source = usage_data.get("_cache_source", "unknown")
-            cache_age = usage_data.get("_cache_age_seconds")
+        expected_burst = burst_cache.get(acc["uuid"])
+        if expected_burst is None or refreshed:
+            expected_burst = db.get_usage_delta_percentile(acc["uuid"])
+            burst_cache[acc["uuid"]] = expected_burst
 
-            expected_burst = burst_cache.get(acc["uuid"])
-            if expected_burst is None or refreshed:
-                expected_burst = db.get_usage_delta_percentile(acc["uuid"])
-                burst_cache[acc["uuid"]] = expected_burst
+        burst_blocked = (utilization + expected_burst) >= BURST_THRESHOLD
 
-            burst_blocked = (utilization + expected_burst) >= BURST_THRESHOLD
+        five_hour_factor = 1.0
+        for threshold, factor in FIVE_HOUR_PENALTIES:
+            if five_hour_util >= threshold:
+                five_hour_factor = factor
+                break
 
-            five_hour_penalty = 0.0
-            for threshold, penalty in FIVE_HOUR_PENALTIES:
-                if five_hour_util >= threshold:
-                    five_hour_penalty = penalty
-                    break
+        adjusted_drain = priority_drain * five_hour_factor
 
-            adjusted_drain = max(priority_drain - five_hour_penalty, 0.0)
+        rank = (
+            adjusted_drain,
+            utilization,
+            -hours_to_reset,
+            -five_hour_util,
+            -active_sessions,
+            -recent_sessions,
+        )
 
-            rank = (
-                adjusted_drain,
-                utilization,
-                -hours_to_reset,
-                -five_hour_util,
-                -active_sessions,
-                -recent_sessions,
-            )
+        return {
+            "account": acc,
+            "tier": tier,
+            "rank": rank,
+            "drain_rate": drain_rate,
+            "priority_drain": priority_drain,
+            "fresh_bonus": fresh_bonus,
+            "adjusted_drain": adjusted_drain,
+            "utilization": utilization,
+            "headroom": headroom,
+            "hours_to_reset": hours_to_reset,
+            "five_hour_utilization": five_hour_util,
+            "five_hour_factor": five_hour_factor,
+            "expected_burst": expected_burst,
+            "burst_blocked": burst_blocked,
+            "active_sessions": active_sessions,
+            "recent_sessions": recent_sessions,
+            "opus_usage": float(opus_util_raw) if opus_util_raw is not None else None,
+            "overall_usage": float(overall_util_raw) if overall_util_raw is not None else None,
+            "window": window,
+            "cache_source": cache_source,
+            "cache_age_seconds": cache_age,
+            "refreshed": refreshed,
+        }
 
-            return {
-                "account": acc,
-                "tier": tier,
-                "rank": rank,
-                "drain_rate": drain_rate,
-                "priority_drain": priority_drain,
-                "fresh_bonus": fresh_bonus,
-                "adjusted_drain": adjusted_drain,
-                "utilization": utilization,
-                "headroom": headroom,
-                "hours_to_reset": hours_to_reset,
-                "five_hour_utilization": five_hour_util,
-                "five_hour_penalty": five_hour_penalty,
-                "expected_burst": expected_burst,
-                "burst_blocked": burst_blocked,
-                "active_sessions": active_sessions,
-                "recent_sessions": recent_sessions,
-                "opus_usage": float(opus_util_raw) if opus_util_raw is not None else None,
-                "overall_usage": float(overall_util_raw) if overall_util_raw is not None else None,
-                "window": window,
-                "cache_source": cache_source,
-                "cache_age_seconds": cache_age,
-                "refreshed": refreshed,
-            }
-
+    def fetch_usage(acc: Dict) -> Optional[Dict]:
         try:
             usage = get_account_usage(db, acc["uuid"], acc["credentials_json"])
+            return {"account": acc, "usage": usage, "error": None}
         except Exception as exc:
-            console.print(f"[yellow]Warning: Could not fetch usage for {acc['email']}: {exc}[/yellow]")
+            return {"account": acc, "usage": None, "error": exc}
+
+    with ThreadPoolExecutor(max_workers=min(len(accounts), 10)) as executor:
+        futures = {executor.submit(fetch_usage, acc): acc for acc in accounts}
+        usage_results = []
+        for future in as_completed(futures):
+            result = future.result()
+            usage_results.append(result)
+
+    for result in usage_results:
+        acc = result["account"]
+        usage = result["usage"]
+        error = result["error"]
+
+        if error:
+            console.print(f"[yellow]Warning: Could not fetch usage for {acc['email']}: {error}[/yellow]")
             continue
 
-        candidate = build_candidate(usage)
+        candidate = build_candidate(acc, usage)
         if not candidate:
             continue
 
@@ -256,7 +276,7 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
         if needs_refresh:
             try:
                 usage = get_account_usage(db, acc["uuid"], acc["credentials_json"], force=True)
-                candidate = build_candidate(usage, refreshed=True)
+                candidate = build_candidate(acc, usage, refreshed=True)
                 if not candidate:
                     continue
             except Exception as exc:
@@ -304,7 +324,7 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
         "priority_drain": selected["priority_drain"],
         "fresh_bonus": selected["fresh_bonus"],
         "adjusted_drain": selected["adjusted_drain"],
-        "five_hour_penalty": selected["five_hour_penalty"],
+        "five_hour_factor": selected["five_hour_factor"],
         "five_hour_utilization": selected["five_hour_utilization"],
         "expected_burst": selected["expected_burst"],
         "burst_blocked": selected["burst_blocked"],

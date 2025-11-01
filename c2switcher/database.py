@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -240,15 +241,16 @@ class Database:
 
     def get_recent_usage(self, account_uuid: str, max_age_seconds: int = 30) -> Optional[Tuple[Dict, str]]:
         cursor = self.conn.cursor()
+        cutoff_time = time.time() - max_age_seconds
         cursor.execute(
             """
             SELECT raw_response, queried_at
             FROM usage_history
             WHERE account_uuid = ?
-            AND datetime(queried_at) > datetime('now', ? || ' seconds')
+            AND strftime('%s', queried_at) > ?
             ORDER BY queried_at DESC LIMIT 1
             """,
-            (account_uuid, f"-{max_age_seconds}"),
+            (account_uuid, str(int(cutoff_time))),
         )
         row = cursor.fetchone()
         if row:
@@ -353,6 +355,20 @@ class Database:
         )
         return cursor.fetchone()[0]
 
+    def get_all_active_session_counts(self) -> Dict[str, int]:
+        """Fetch active session counts for all accounts in one query."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT account_uuid, COUNT(*) as count
+            FROM sessions
+            WHERE ended_at IS NULL AND account_uuid IS NOT NULL
+            GROUP BY account_uuid
+            """
+        )
+        result = {row[0]: row[1] for row in cursor.fetchall()}
+        return result
+
     def create_session(
         self,
         session_id: str,
@@ -412,16 +428,16 @@ class Database:
         return cursor.fetchone()[0]
 
     def assign_session_to_account(self, session_id: str, account_uuid: str):
-        cursor = self.conn.cursor()
-        cursor.execute(
-            """
-            UPDATE sessions
-            SET account_uuid = ?
-            WHERE session_id = ?
-            """,
-            (account_uuid, session_id),
-        )
-        self.conn.commit()
+        with self.conn:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                UPDATE sessions
+                SET account_uuid = ?
+                WHERE session_id = ?
+                """,
+                (account_uuid, session_id),
+            )
 
     def mark_session_ended(self, session_id: str):
         cursor = self.conn.cursor()
