@@ -19,7 +19,6 @@ from .constants import C2SWITCHER_DIR, CLAUDE_DIR, CREDENTIALS_PATH, console
 from .database import Database
 from .load_balancer import select_account_with_load_balancing
 from .locking import acquire_lock
-from .reports import generate_session_report, generate_usage_report
 from .sessions import cleanup_dead_sessions, register_session
 from .tokens import refresh_token
 from .usage import get_account_usage
@@ -791,6 +790,8 @@ def session_history(limit: int, min_duration: int, output_json: bool):
 @click.option("--show", is_flag=True, help="Display the visualization after rendering (requires GUI backend)")
 def report_sessions(db_path: Path, output_path: Path, days: int, min_duration: int, show: bool):
     """Generate the modern session analytics report."""
+    from .reports.sessions import generate_session_report
+
     generate_session_report(db_path, output_path, days=days, min_duration=min_duration, show=show)
 
 
@@ -821,6 +822,8 @@ def report_sessions(db_path: Path, output_path: Path, days: int, min_duration: i
 @click.option("--show", is_flag=True, help="Display the visualization after rendering (requires GUI backend)")
 def report_usage(db_path: Path, output_path: Path, window_hours: int, show: bool):
     """Generate the modern usage risk forecast report."""
+    from .reports.usage import generate_usage_report
+
     generate_usage_report(db_path, output_path, window_hours=window_hours, show=show)
 
 
