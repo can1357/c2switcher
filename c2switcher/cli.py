@@ -114,7 +114,8 @@ def add(nickname: Optional[str], creds_file: Optional[str]):
 @click.option("--token-only", is_flag=True, help="Output only the token to stdout")
 @click.option("--quiet", is_flag=True, help="Suppress panel output (use with --token-only)")
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
-def optimal(dry_run: bool, session_id: Optional[str], token_only: bool, quiet: bool, output_json: bool):
+@click.option("--verbose", "-v", is_flag=True, help="Show detailed metrics (drain rates, headroom, etc.)")
+def optimal(dry_run: bool, session_id: Optional[str], token_only: bool, quiet: bool, output_json: bool, verbose: bool):
     """Find and switch to the optimal account with load balancing and session stickiness."""
     # Always guard token refresh work so concurrent invocations cannot race.
     acquire_lock()
@@ -206,31 +207,30 @@ def optimal(dry_run: bool, session_id: Optional[str], token_only: bool, quiet: b
             f"Overall Usage: {result.get('overall_usage', 0):>3}%"
         )
 
-        if "drain_rate" in result:
-            info_text += f"\n[dim]Baseline Drain: {result['drain_rate']:.3f} %/h[/dim]"
-        if "priority_drain" in result and "fresh_bonus" in result:
-            info_text += (
-                f"\n[dim]Priority Drain: {result['priority_drain']:.3f} %/h "
-                f"(fresh bonus {result['fresh_bonus']:.2f})[/dim]"
-            )
-        if "adjusted_drain" in result and "five_hour_penalty" in result:
-            info_text += (
-                f"\n[dim]Adjusted Drain: {result['adjusted_drain']:.3f} %/h "
-                f"(5h pen {result['five_hour_penalty']:.2f})[/dim]"
-            )
-        if "headroom" in result:
-            info_text += f"\n[dim]Headroom: {result['headroom']:.1f}%[/dim]"
-        if "expected_burst" in result:
-            info_text += f"\n[dim]Burst Buffer: {result['expected_burst']:.1f}%[/dim]"
-        if "five_hour_utilization" in result:
-            info_text += f"\n[dim]5h Utilization: {result['five_hour_utilization']:.1f}%[/dim]"
-        if "hours_to_reset" in result:
-            info_text += f"\n[dim]Hours to Reset: {result['hours_to_reset']:.1f}[/dim]"
-        if result.get("cache_source"):
-            cache_info = result["cache_source"]
-            if result.get("cache_age_seconds") is not None:
-                cache_info += f" ({result['cache_age_seconds']:.0f}s old)"
-            info_text += f"\n[dim]Usage source: {cache_info}[/dim]"
+        # Always show: drain rate, headroom, hours to reset (one line each)
+        if "drain_rate" in result and "headroom" in result and "hours_to_reset" in result:
+            info_text += f"\nDrain: {result['drain_rate']:.2f}%/h | Headroom: {result['headroom']:.0f}% | Reset: {result['hours_to_reset']:.0f}h"
+
+        if verbose:
+            if "priority_drain" in result and "fresh_bonus" in result:
+                info_text += (
+                    f"\n[dim]Priority Drain: {result['priority_drain']:.3f} %/h "
+                    f"(fresh bonus {result['fresh_bonus']:.2f})[/dim]"
+                )
+            if "adjusted_drain" in result and "five_hour_penalty" in result:
+                info_text += (
+                    f"\n[dim]Adjusted Drain: {result['adjusted_drain']:.3f} %/h "
+                    f"(5h pen {result['five_hour_penalty']:.2f})[/dim]"
+                )
+            if "expected_burst" in result:
+                info_text += f"\n[dim]Burst Buffer: {result['expected_burst']:.1f}%[/dim]"
+            if "five_hour_utilization" in result:
+                info_text += f"\n[dim]5h Utilization: {result['five_hour_utilization']:.1f}%[/dim]"
+            if result.get("cache_source"):
+                cache_info = result["cache_source"]
+                if result.get("cache_age_seconds") is not None:
+                    cache_info += f" ({result['cache_age_seconds']:.0f}s old)"
+                info_text += f"\n[dim]Usage source: {cache_info}[/dim]"
 
         info_text += session_info
 
