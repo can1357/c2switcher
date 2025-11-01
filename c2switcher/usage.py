@@ -30,24 +30,7 @@ def get_account_usage(db: Database, account_uuid: str, credentials_json: str, fo
             usage_copy["_queried_at"] = queried_at
             return usage_copy
 
-    cursor = db.conn.cursor()
-    cursor.execute(
-        "SELECT uuid, email, org_uuid, display_name, billing_type, org_name FROM accounts WHERE uuid = ?",
-        (account_uuid,),
-    )
-    row = cursor.fetchone()
-    account_info = None
-    if row:
-        account_info = {
-            "uuid": row[0],
-            "email": row[1],
-            "org_uuid": row[2],
-            "display_name": row[3],
-            "billing_type": row[4],
-            "org_name": row[5],
-        }
-
-    refreshed_creds = refresh_token(credentials_json, account_uuid, account_info)
+    refreshed_creds = refresh_token(credentials_json)
     token = refreshed_creds.get("claudeAiOauth", {}).get("accessToken")
 
     if not token:

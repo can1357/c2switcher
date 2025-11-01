@@ -62,7 +62,7 @@ def add(nickname: Optional[str], creds_file: Optional[str]):
 
         expires_at = credentials.get("claudeAiOauth", {}).get("expiresAt", 0)
         if expires_at <= int(time.time() * 1000):
-            credentials = refresh_token(json.dumps(credentials), account_uuid=None)
+            credentials = refresh_token(json.dumps(credentials))
 
         token = credentials.get("claudeAiOauth", {}).get("accessToken")
         if not token:
@@ -75,7 +75,7 @@ def add(nickname: Optional[str], creds_file: Optional[str]):
         except requests.exceptions.HTTPError as exc:
             if exc.response.status_code == 401:
                 console.print("[yellow]Token rejected, attempting refresh...[/yellow]")
-                credentials = refresh_token(json.dumps(credentials), account_uuid=None)
+                credentials = refresh_token(json.dumps(credentials))
                 token = credentials.get("claudeAiOauth", {}).get("accessToken")
                 with console.status("[bold green]Retrying profile fetch..."):
                     profile = ClaudeAPI.get_profile(token)
@@ -87,7 +87,7 @@ def add(nickname: Optional[str], creds_file: Optional[str]):
             console.print("[red]Error: No account UUID in profile[/red]")
             return
 
-        credentials = refresh_token(json.dumps(credentials), account_uuid)
+        credentials = refresh_token(json.dumps(credentials))
         index = db.add_account(profile, credentials, nickname)
 
         account = profile.get("account", {})
@@ -133,15 +133,7 @@ def optimal(switch: bool, session_id: Optional[str], token_only: bool):
 
         if switch or token_only:
             credentials = json.loads(account["credentials_json"])
-            account_info = {
-                "uuid": account["uuid"],
-                "email": account["email"],
-                "org_uuid": account["org_uuid"],
-                "display_name": account["display_name"],
-                "billing_type": account["billing_type"],
-                "org_name": account["org_name"],
-            }
-            refreshed_creds = refresh_token(json.dumps(credentials), account["uuid"], account_info)
+            refreshed_creds = refresh_token(json.dumps(credentials))
             token = refreshed_creds.get("claudeAiOauth", {}).get("accessToken")
 
             if not token:
@@ -253,15 +245,7 @@ def switch(identifier: Optional[str], session_id: Optional[str], token_only: boo
 
         credentials = json.loads(account["credentials_json"])
 
-        account_info = {
-            "uuid": account["uuid"],
-            "email": account["email"],
-            "org_uuid": account["org_uuid"],
-            "display_name": account["display_name"],
-            "billing_type": account["billing_type"],
-            "org_name": account["org_name"],
-        }
-        refreshed_creds = refresh_token(json.dumps(credentials), account["uuid"], account_info)
+        refreshed_creds = refresh_token(json.dumps(credentials))
         token = refreshed_creds.get("claudeAiOauth", {}).get("accessToken")
 
         if not token:
@@ -346,21 +330,7 @@ def force_refresh(identifier: Optional[str]):
             account_display = f"[{account['index_num']}] {account['nickname'] or account['email']}"
 
             try:
-                account_info = {
-                    "uuid": account["uuid"],
-                    "email": account["email"],
-                    "org_uuid": account["org_uuid"],
-                    "display_name": account["display_name"],
-                    "billing_type": account["billing_type"],
-                    "org_name": account["org_name"],
-                }
-
-                refreshed_creds = refresh_token(
-                    account["credentials_json"],
-                    account["uuid"],
-                    account_info,
-                    force=True,
-                )
+                refreshed_creds = refresh_token(account["credentials_json"], force=True)
 
                 cursor = db.conn.cursor()
                 cursor.execute(
@@ -426,15 +396,7 @@ def cycle():
         else:
             next_account = accounts[0]
 
-        account_info = {
-            "uuid": next_account["uuid"],
-            "email": next_account["email"],
-            "org_uuid": next_account["org_uuid"],
-            "display_name": next_account["display_name"],
-            "billing_type": next_account["billing_type"],
-            "org_name": next_account["org_name"],
-        }
-        refreshed_creds = refresh_token(next_account["credentials_json"], next_account["uuid"], account_info)
+        refreshed_creds = refresh_token(next_account["credentials_json"])
 
         CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
         atomic_write_json(CREDENTIALS_PATH, refreshed_creds)
