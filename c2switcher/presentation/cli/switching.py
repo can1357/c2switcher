@@ -78,6 +78,8 @@ def optimal(dry_run: bool, session_id: Optional[str], token_only: bool, quiet: b
       masked_email = mask_email(decision.account.email)
 
       tier_label = f"Tier {decision.tier}" if decision.tier else "N/A"
+      opus_usage = decision.opus_usage if decision.opus_usage is not None else 0
+      overall_usage = decision.overall_usage if decision.overall_usage is not None else 0
       session_info = ""
 
       if decision.reused:
@@ -91,8 +93,8 @@ def optimal(dry_run: bool, session_id: Optional[str], token_only: bool, quiet: b
          f"[green]Optimal Account (={decision.account.index_num}) - {tier_label}[/green]\n\n"
          f"Nickname: [bold]{nickname}[/bold]\n"
          f"Email: [bold]{masked_email}[/bold]\n"
-         f"Opus Usage:    {decision.opus_usage:>3}%\n"
-         f"Overall Usage: {decision.overall_usage:>3}%"
+         f"Opus Usage:    {opus_usage:>3}%\n"
+         f"Overall Usage: {overall_usage:>3}%"
       )
 
       # Always show: drain rate, headroom, hours to reset

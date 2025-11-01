@@ -7,6 +7,7 @@ from .switching import optimal, switch, cycle
 from .sessions_cmd import start_session_cmd, end_session, list_sessions, session_history
 from .reports import report_sessions, report_usage
 from .usage_cmd import usage
+from .login import login
 
 
 @click.group()
@@ -15,6 +16,7 @@ def cli():
 
 
 # Register commands
+cli.add_command(login)
 cli.add_command(add)
 cli.add_command(list_accounts_cmd)
 cli.add_command(current)

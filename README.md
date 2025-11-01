@@ -24,7 +24,7 @@ _Live usage monitoring with color-coded badges and one-click account switching_
 
 ## Disclaimer
 
-_This tool uses undocumented OAuth API endpoints to fetch usage data. While Anthropic allows users to create multiple accounts (confirmed by multiple people who asked Anthropic Staff, including me), this specific implementation relies on reverse-engineered API paths that may change without notice._
+_This tool uses undocumented OAuth API endpoints to fetch usage data and authenticate accounts. While Anthropic allows users to create multiple accounts (confirmed by multiple people who asked Anthropic Staff, including me), this implementation relies on reverse-engineered API endpoints that may change without notice._
 
 _If Anthropic would prefer this tool not exist, please reach out and I'll gladly take it down. I'm very compliant like that :)_
 
@@ -65,6 +65,32 @@ pip install -e .
 ## Usage
 
 ### Adding Accounts
+
+**Option 1: OAuth Login (Recommended)**
+
+Authenticate directly with Anthropic and automatically add the account:
+
+```bash
+c2switcher login
+```
+
+This uses dual-flow authentication (automatic localhost callback + manual fallback) matching Claude Code's native behavior. Options:
+
+```bash
+# Login with a nickname
+c2switcher login --nickname work
+
+# Manual-only mode (disable localhost server)
+c2switcher login --manual-only
+
+# Don't auto-open browser
+c2switcher login --no-browser
+
+# Save credentials but don't add to c2switcher
+c2switcher login --no-add
+```
+
+**Option 2: Import Existing Credentials**
 
 Add your current account (from `~/.claude/.credentials.json`):
 
@@ -324,7 +350,8 @@ kpackagetool6 --type=Plasma/Applet --install plasmoid
 
 | Command           | Aliases                 | Description                              |
 | ----------------- | ----------------------- | ---------------------------------------- |
-| `add`             |                         | Add a new account                        |
+| `login`           |                         | OAuth login and add account              |
+| `add`             |                         | Import existing account credentials      |
 | `ls`              | `list`, `list-accounts` | List all accounts                        |
 | `usage`           |                         | Show usage across accounts               |
 | `current`         |                         | Show currently active account            |
@@ -486,7 +513,12 @@ rm -rf ~/.c2switcher/
 ### Typical Workflow
 
 ```bash
-# Add your accounts (switch credentials in Claude Code first, then add)
+# Add your accounts via OAuth login
+c2switcher login --nickname main
+c2switcher login --nickname work
+c2switcher login --nickname personal
+
+# Or import existing credentials
 c2switcher add --nickname main
 c2switcher add --nickname work
 c2switcher add --nickname personal
