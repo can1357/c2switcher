@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from .constants import (
     BURST_THRESHOLD,
-    FIVE_HOUR_MULTIPLIERS,
+    FIVE_HOUR_PENALTIES,
     FIVE_HOUR_ROTATION_CAP,
     FRESH_ACCOUNT_MAX_BONUS,
     FRESH_UTILIZATION_THRESHOLD,
@@ -101,7 +101,7 @@ def _log_balancer_candidates(label: str, candidates: List[Dict]):
         age_str = f"{cache_age:.0f}s" if isinstance(cache_age, (int, float)) and cache_age is not None else "-"
         info = (
             f"- {acc['email']}: tier={cand['tier']} drain={cand['drain_rate']:.3f} adj={cand['adjusted_drain']:.3f} "
-            f"bonus={cand['fresh_bonus']:.2f} mult={cand['five_hour_multiplier']:.2f} util={cand['utilization']:.1f} "
+            f"bonus={cand['fresh_bonus']:.2f} pen={cand['five_hour_penalty']:.2f} util={cand['utilization']:.1f} "
             f"headroom={cand['headroom']:.1f} burst={cand['expected_burst']:.1f} "
             f"blocked={int(cand['burst_blocked'])} hours={cand['hours_to_reset']:.1f} "
             f"five_hour={cand['five_hour_utilization']:.1f} active={cand['active_sessions']} "
@@ -192,13 +192,13 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
 
             burst_blocked = (utilization + expected_burst) >= BURST_THRESHOLD
 
-            five_hour_multiplier = 1.0
-            for threshold, multiplier in FIVE_HOUR_MULTIPLIERS:
+            five_hour_penalty = 0.0
+            for threshold, penalty in FIVE_HOUR_PENALTIES:
                 if five_hour_util >= threshold:
-                    five_hour_multiplier = multiplier
+                    five_hour_penalty = penalty
                     break
 
-            adjusted_drain = priority_drain * five_hour_multiplier
+            adjusted_drain = max(priority_drain - five_hour_penalty, 0.0)
 
             rank = (
                 adjusted_drain,
@@ -221,7 +221,7 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
                 "headroom": headroom,
                 "hours_to_reset": hours_to_reset,
                 "five_hour_utilization": five_hour_util,
-                "five_hour_multiplier": five_hour_multiplier,
+                "five_hour_penalty": five_hour_penalty,
                 "expected_burst": expected_burst,
                 "burst_blocked": burst_blocked,
                 "active_sessions": active_sessions,
@@ -304,7 +304,7 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
         "priority_drain": selected["priority_drain"],
         "fresh_bonus": selected["fresh_bonus"],
         "adjusted_drain": selected["adjusted_drain"],
-        "five_hour_multiplier": selected["five_hour_multiplier"],
+        "five_hour_penalty": selected["five_hour_penalty"],
         "five_hour_utilization": selected["five_hour_utilization"],
         "expected_burst": selected["expected_burst"],
         "burst_blocked": selected["burst_blocked"],

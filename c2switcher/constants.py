@@ -20,12 +20,12 @@ LB_STATE_PATH = C2SWITCHER_DIR / "load_balancer_state.json"
 SIMILAR_DRAIN_THRESHOLD = 0.05  # %/hour margin to consider accounts interchangeable
 STALE_CACHE_SECONDS = 60  # force refresh if cache older than this (seconds)
 HIGH_DRAIN_REFRESH_THRESHOLD = 1.0  # %/hour that warrants a fresh usage pull
-FIVE_HOUR_MULTIPLIERS = [
+FIVE_HOUR_PENALTIES = [
     (90.0, 0.5),
-    (85.0, 0.7),
+    (80.0, 0.2),
 ]
 FIVE_HOUR_ROTATION_CAP = 90.0  # avoid round robin entries above this 5h util
-BURST_THRESHOLD = 92.0  # skip accounts whose expected burst would exceed this
+BURST_THRESHOLD = 94.0  # skip accounts whose expected burst would exceed this
 DEFAULT_BURST_BUFFER = 4.0  # fallback burst size when history is sparse
 FRESH_UTILIZATION_THRESHOLD = 25.0  # % usage considered "fresh" and boosted
 FRESH_ACCOUNT_MAX_BONUS = 3.0  # max %/hour boost applied to very fresh accounts
