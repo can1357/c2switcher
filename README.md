@@ -19,7 +19,7 @@ _Live usage monitoring with color-coded badges and one-click account switching_
 - **Smart load balancing** - Automatically picks the optimal account based on usage and active sessions
 - **Session tracking** - See which accounts are actively being used and where
 - **KDE Plasma widget** - Monitor all accounts from your panel
-- **Usage caching** - Respects rate limits with 30-second cache
+- **Usage caching** - Respects rate limits with 5-minute cache
 - **Wrapper script** - `c2claude` command for seamless account switching
 
 ## Disclaimer
@@ -131,7 +131,7 @@ Color indicators:
 - 🟡 **Yellow** (70-90%) - Getting close
 - 🔴 **Red** (> 90%) - Nearly exhausted
 
-Force refresh (ignore 30s cache):
+Force refresh (ignore 5min cache):
 
 ```bash
 c2switcher usage --force
@@ -184,22 +184,55 @@ Switch by email:
 c2switcher switch user@example.com
 ```
 
-### Finding the Optimal Account
+### Finding and Switching to the Optimal Account
 
 ```bash
 c2switcher optimal
 ```
 
-This shows the best account based on:
+This automatically switches to the best account based on:
 
-1. **Tier 1**: Opus usage < 90% (prioritized)
-2. **Tier 2**: Opus exhausted but overall usage < 90%
-3. **Load balancing**: Considers active and recent sessions
+1. **Drain rate urgency** - Headroom ÷ hours until reset (prioritizes accounts about to reset)
+2. **Fresh account bonus** - Boosts accounts with <25% usage (up to +3.0 %/hour)
+3. **Five-hour throttling** - Multiplicative penalty for high 5-hour usage (90%: ×0.5, 85%: ×0.7, 80%: ×0.85)
+4. **Tier priority** - Opus capacity (tier 1) preferred over overall (tier 2)
+5. **Burst protection** - Skips accounts where usage + expected burst ≥ 94%
+6. **Load balancing** - Round-robin for similar drain rates, considers active/recent sessions
 
-Switch to the optimal account:
+Show optimal account without switching:
 
 ```bash
-c2switcher optimal --switch
+c2switcher optimal --dry-run
+```
+
+Get token only (for scripts):
+
+```bash
+c2switcher optimal --token-only --quiet
+```
+
+### Checking Current Account
+
+See which account is currently active:
+
+```bash
+c2switcher current
+```
+
+For use in shell prompts:
+
+```bash
+c2switcher current --format=prompt
+# Output: [0] main
+
+# Example PS1 integration:
+PS1='$(c2switcher current --format=prompt) $ '
+```
+
+JSON output:
+
+```bash
+c2switcher current --json
 ```
 
 ### Cycling Through Accounts
@@ -294,13 +327,15 @@ kpackagetool6 --type=Plasma/Applet --install plasmoid
 | `add`             |                         | Add a new account                        |
 | `ls`              | `list`, `list-accounts` | List all accounts                        |
 | `usage`           |                         | Show usage across accounts               |
+| `current`         |                         | Show currently active account            |
 | `report-sessions` |                         | Generate session analytics report        |
 | `report-usage`    |                         | Generate usage risk forecast report      |
-| `optimal`         | `pick`                  | Find optimal account                     |
+| `optimal`         | `pick`                  | Find and switch to optimal account       |
 | `switch`          | `use`                   | Switch to specific account               |
 | `cycle`           |                         | Rotate to next account                   |
 | `sessions`        |                         | List active sessions                     |
 | `history`         | `session-history`       | Show past sessions with usage deltas     |
+| `force-refresh`   |                         | Force token refresh for account(s)       |
 
 ### Session Commands
 
@@ -330,39 +365,68 @@ All data is stored in `~/.c2switcher/store.db` (SQLite):
 
 ### Token Refresh
 
-When a token expires, c2switcher automatically refreshes it:
+When a token expires (or within 10 minutes of expiry), c2switcher automatically refreshes it using Anthropic's OAuth token endpoint. This is a direct API call that doesn't consume usage.
 
-1. First tries: `claude -p /status --verbose --output-format=json` (no usage)
-2. Falls back to: `claude -p hi --model haiku` if needed
+Force refresh tokens manually:
 
-This ensures tokens stay valid with minimal to no usage consumption.
+```bash
+# Refresh all accounts
+c2switcher force-refresh
 
-**Sandboxed Refresh**: Token refresh operations run in an isolated temporary HOME directory (`~/.c2switcher/tmp/{account_uuid}`) to avoid interfering with any running Claude Code instances. User preferences (terminal theme, settings) are inherited from the real HOME to prevent prompts. The sandbox is automatically cleaned up after each refresh.
+# Refresh specific account
+c2switcher force-refresh work
+```
 
 If refresh fails (e.g., revoked or invalid credentials), you'll see:
 
 ```
-Error: Failed to refresh token. The credentials may be revoked or invalid.
-Please re-authenticate by logging in to Claude Code with this account.
+Error: Direct token refresh failed. Please re-authenticate.
 ```
+
+In this case, log in to Claude Code with that account and re-add it to c2switcher.
 
 ### Usage Caching
 
-API calls are cached for 30 seconds to avoid rate limiting. Use `--force` to bypass.
+API calls are cached for 5 minutes to avoid rate limiting. Use `--force` to bypass the cache.
 
-### Load Balancing
+### Load Balancing Algorithm
 
-The optimal account selection uses a scoring system:
+The optimal account selection uses a sophisticated drain-rate scoring system:
 
-```
-score = base_usage + (active_sessions × 15) + (recent_sessions × 5)
-```
+1. **Baseline drain rate**: `(99% - current_usage) / hours_until_reset`
+   - Measures %/hour capacity before limit
+   - Higher = more urgent to use (about to reset soon)
 
-Where:
+2. **Fresh account boost**: Accounts <25% usage get bonus up to +3.0 %/hour
+   - Encourages using fresh accounts before they expire unused
+   - Linear scaling: 0% usage = +3.0, 25% usage = +0.0
 
-- `base_usage` = Opus usage (tier 1) or overall usage (tier 2)
-- `active_sessions` = currently running Claude instances
-- `recent_sessions` = sessions started in last 5 minutes
+3. **Priority drain**: `baseline_drain + fresh_bonus`
+
+4. **Five-hour throttling**: Multiplicative penalty for high short-term usage
+   - 90%+ in last 5h: ×0.5 (half priority)
+   - 85-90%: ×0.7
+   - 80-85%: ×0.85
+   - Prevents overuse concentration
+
+5. **Adjusted drain**: `priority_drain × five_hour_factor`
+
+6. **Final ranking** (in order):
+   - Adjusted drain (primary metric)
+   - Utilization (lower is better)
+   - Hours to reset (closer = better)
+   - Five-hour util (lower = better)
+   - Active sessions (fewer = better)
+   - Recent sessions (fewer = better)
+
+7. **Filtering**:
+   - Burst protection: Skip if `usage + expected_burst ≥ 94%`
+   - Cool-down: Prefer accounts with 5-hour usage <90%
+   - Tier priority: Opus capacity always beats overall
+
+8. **Round-robin**: Accounts with similar drain (±0.05 %/hour) rotate fairly
+
+This maximizes total usage across all accounts while preventing limit violations.
 
 ### Session Tracking
 
@@ -378,19 +442,21 @@ Dead sessions are automatically cleaned up using multi-factor liveness checks.
 
 ## Environment Variables
 
-| Variable           | Description                          |
-| ------------------ | ------------------------------------ |
-| `DEBUG_SESSIONS=1` | Enable verbose session tracking logs |
+| Variable                      | Description                          |
+| ----------------------------- | ------------------------------------ |
+| `DEBUG_SESSIONS=1`            | Enable verbose session tracking logs |
+| `C2SWITCHER_DEBUG_BALANCER=1` | Show detailed load balancer scoring  |
 
 ## Files and Paths
 
-| Path                             | Purpose                                        |
-| -------------------------------- | ---------------------------------------------- |
-| `~/.c2switcher/store.db`         | SQLite database (accounts, usage, sessions)    |
-| `~/.c2switcher/tmp/{uuid}/`      | Sandboxed temp directories for token refresh   |
-| `~/.claude/.credentials.json`    | Active Claude Code credentials                 |
-| `/usr/local/bin/c2switcher`      | CLI tool                                       |
-| `/usr/local/bin/c2claude`        | Wrapper script                                 |
+| Path                                  | Purpose                                        |
+| ------------------------------------- | ---------------------------------------------- |
+| `~/.c2switcher/store.db`              | SQLite database (accounts, usage, sessions)    |
+| `~/.c2switcher/load_balancer_state.json` | Round-robin state for fair account rotation |
+| `~/.c2switcher/.last_cleanup`         | Session cleanup throttle marker                |
+| `~/.claude/.credentials.json`         | Active Claude Code credentials                 |
+| `/usr/local/bin/c2switcher`           | CLI tool                                       |
+| `/usr/local/bin/c2claude`             | Wrapper script                                 |
 
 ## Uninstallation
 
@@ -442,12 +508,20 @@ c2switcher history
 
 ```bash
 # Get JSON output for parsing
-optimal=$(c2switcher optimal --json)
+optimal=$(c2switcher optimal --dry-run --json)
 email=$(echo "$optimal" | jq -r '.email')
 echo "Best account: $email"
 
+# Get current account
+current=$(c2switcher current --json)
+echo "Active: $(echo "$current" | jq -r '.email')"
+
 # Check if any account has Opus available
 c2switcher usage --json | jq '.[] | select(.usage.seven_day_opus.utilization < 90)'
+
+# Get token for scripting
+token=$(c2switcher optimal --token-only --quiet)
+# Now use $token with Anthropic API
 ```
 
 ### Quick Account Rotation

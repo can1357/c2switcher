@@ -5,9 +5,11 @@ from __future__ import annotations
 import copy
 import json
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from filelock import FileLock
 
@@ -121,256 +123,334 @@ def _log_balancer_candidates(label: str, candidates: List[Dict]):
         console.print(info)
 
 
-def select_account_with_load_balancing(db: Database, session_id: Optional[str] = None) -> Optional[Dict]:
-    # Skip expensive session cleanup if called recently (< 30s ago)
-    import time
-    from pathlib import Path
+def _maybe_cleanup_sessions(db: Database):
     cleanup_marker = Path.home() / ".c2switcher" / ".last_cleanup"
     now = time.time()
     should_cleanup = True
     if cleanup_marker.exists():
         try:
-            last_cleanup = cleanup_marker.stat().st_mtime
-            if now - last_cleanup < 30:
+            if now - cleanup_marker.stat().st_mtime < 30:
                 should_cleanup = False
         except Exception:
-            pass
+            should_cleanup = True
+
     if should_cleanup:
         cleanup_dead_sessions(db)
+        cleanup_marker.parent.mkdir(parents=True, exist_ok=True)
         cleanup_marker.touch(exist_ok=True)
 
-    if session_id:
-        existing = db.get_session_account(session_id)
-        if existing:
-            try:
-                usage = get_account_usage(db, existing["uuid"], existing["credentials_json"])
-                seven_day_opus = usage.get("seven_day_opus", {}) or {}
-                seven_day = usage.get("seven_day", {}) or {}
-                opus_util = seven_day_opus.get("utilization")
-                overall_util = seven_day.get("utilization")
-                opus_ok = opus_util is None or float(opus_util) < 99
-                overall_ok = overall_util is None or float(overall_util) < 99
-                if opus_ok and overall_ok:
-                    return {"account": existing, "reused": True}
-            except Exception:
-                pass
 
-    accounts = db.get_all_accounts()
-    if not accounts:
+def _reuse_existing_session(db: Database, session_id: str) -> Optional[Dict[str, Any]]:
+    existing = db.get_session_account(session_id)
+    if not existing:
         return None
 
-    candidates: List[Dict[str, Any]] = []
-    burst_cache: Dict[str, float] = {}
+    account = dict(existing)
+    try:
+        usage = get_account_usage(db, account["uuid"], account["credentials_json"])
+        seven_day_opus = usage.get("seven_day_opus", {}) or {}
+        seven_day = usage.get("seven_day", {}) or {}
+        opus_util = seven_day_opus.get("utilization")
+        overall_util = seven_day.get("utilization")
+        opus_ok = opus_util is None or float(opus_util) < 99
+        overall_ok = overall_util is None or float(overall_util) < 99
+        if opus_ok and overall_ok:
+            return {"account": account, "reused": True}
+    except Exception:
+        pass
+    return None
 
-    def build_candidate(acc: Dict, usage_data: Dict, refreshed: bool = False) -> Optional[Dict[str, Any]]:
-        five_hour = usage_data.get("five_hour", {}) or {}
-        seven_day_opus = usage_data.get("seven_day_opus", {}) or {}
-        seven_day = usage_data.get("seven_day", {}) or {}
 
-        opus_util_raw = seven_day_opus.get("utilization")
-        overall_util_raw = seven_day.get("utilization")
-
-        opus_util = float(opus_util_raw) if opus_util_raw is not None else 100.0
-        overall_util = float(overall_util_raw) if overall_util_raw is not None else 100.0
-
-        if opus_util >= 99.0 and overall_util >= 99.0:
-            return None
-
-        if opus_util < 99.0:
-            window = "opus"
-            utilization = opus_util
-            resets_at = seven_day_opus.get("resets_at")
-            tier = 1
-        else:
-            window = "overall"
-            utilization = overall_util
-            resets_at = seven_day.get("resets_at")
-            tier = 2
-
-        hours_to_reset = _hours_until_reset(resets_at)
-        headroom = max(99.0 - utilization, 0.0)
-        drain_rate = headroom / max(hours_to_reset, 0.001) if headroom > 0 else 0.0
-
-        fresh_bonus = 0.0
-        if headroom > 0 and utilization < FRESH_UTILIZATION_THRESHOLD:
-            freshness = (FRESH_UTILIZATION_THRESHOLD - utilization) / FRESH_UTILIZATION_THRESHOLD
-            fresh_bonus = freshness * FRESH_ACCOUNT_MAX_BONUS
-
-        priority_drain = drain_rate + fresh_bonus
-
-        five_hour_util_raw = five_hour.get("utilization")
-        five_hour_util = float(five_hour_util_raw) if five_hour_util_raw is not None else 50.0
-
-        active_sessions = db.count_active_sessions(acc["uuid"])
-        recent_sessions = db.count_recent_sessions(acc["uuid"], minutes=5)
-
-        cache_source = usage_data.get("_cache_source", "unknown")
-        cache_age = usage_data.get("_cache_age_seconds")
-
-        expected_burst = burst_cache.get(acc["uuid"])
-        if expected_burst is None or refreshed:
-            expected_burst = db.get_usage_delta_percentile(acc["uuid"])
-            burst_cache[acc["uuid"]] = expected_burst
-
-        burst_blocked = (utilization + expected_burst) >= BURST_THRESHOLD
-
-        five_hour_factor = 1.0
-        for threshold, factor in FIVE_HOUR_PENALTIES:
-            if five_hour_util >= threshold:
-                five_hour_factor = factor
-                break
-
-        adjusted_drain = priority_drain * five_hour_factor
-
-        rank = (
-            adjusted_drain,
-            utilization,
-            -hours_to_reset,
-            -five_hour_util,
-            -active_sessions,
-            -recent_sessions,
-        )
-
-        return {
-            "account": acc,
-            "tier": tier,
-            "rank": rank,
-            "drain_rate": drain_rate,
-            "priority_drain": priority_drain,
-            "fresh_bonus": fresh_bonus,
-            "adjusted_drain": adjusted_drain,
-            "utilization": utilization,
-            "headroom": headroom,
-            "hours_to_reset": hours_to_reset,
-            "five_hour_utilization": five_hour_util,
-            "five_hour_factor": five_hour_factor,
-            "expected_burst": expected_burst,
-            "burst_blocked": burst_blocked,
-            "active_sessions": active_sessions,
-            "recent_sessions": recent_sessions,
-            "opus_usage": float(opus_util_raw) if opus_util_raw is not None else None,
-            "overall_usage": float(overall_util_raw) if overall_util_raw is not None else None,
-            "window": window,
-            "cache_source": cache_source,
-            "cache_age_seconds": cache_age,
-            "refreshed": refreshed,
-        }
-
-    # Check cache in main thread first
-    accounts_to_fetch = []
-    cached_usage = {}
+def _collect_cached_usage(
+    db: Database, accounts: List[Dict[str, Any]]
+) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+    cached_usage: Dict[str, Dict[str, Any]] = {}
+    missing_accounts: List[Dict[str, Any]] = []
 
     for acc in accounts:
         cached = db.get_recent_usage(acc["uuid"], max_age_seconds=CACHE_TTL_SECONDS)
-        if cached:
-            usage, queried_at = cached
-            cache_age = None
-            try:
-                cache_dt = datetime.fromisoformat(queried_at.replace("Z", "+00:00"))
-                cache_age = max((datetime.now(timezone.utc) - cache_dt).total_seconds(), 0)
-            except Exception:
-                cache_age = None
+        if not cached:
+            missing_accounts.append(acc)
+            continue
 
-            # Use cache if within TTL (already checked by get_recent_usage)
-            usage_copy = copy.deepcopy(usage)
-            usage_copy.setdefault("_cache_source", "cache")
-            usage_copy["_cache_age_seconds"] = cache_age
-            usage_copy["_queried_at"] = queried_at
-            cached_usage[acc["uuid"]] = usage_copy
-        else:
-            accounts_to_fetch.append(acc)
-
-    # Parallel fetch from API (HTTP only, no DB)
-    def fetch_from_api(acc: Dict) -> Dict:
-        """Pure HTTP fetch - zero DB access."""
+        usage, queried_at = cached
+        usage_copy = copy.deepcopy(usage)
+        cache_age: Optional[float]
         try:
-            refreshed_creds = refresh_token(acc["credentials_json"])
-            token = refreshed_creds.get("claudeAiOauth", {}).get("accessToken")
-            if not token:
-                raise ValueError("No access token")
+            cache_dt = datetime.fromisoformat(queried_at.replace("Z", "+00:00"))
+            if cache_dt.tzinfo is None:
+                cache_dt = cache_dt.replace(tzinfo=timezone.utc)
+            cache_age = max((datetime.now(timezone.utc) - cache_dt).total_seconds(), 0)
+        except Exception:
+            cache_age = None
 
-            usage = ClaudeAPI.get_usage(token)
-            usage.setdefault("_cache_source", "live")
-            usage["_cache_age_seconds"] = 0.0
-            usage["_queried_at"] = datetime.now(timezone.utc).isoformat()
+        usage_copy.setdefault("_cache_source", "cache")
+        usage_copy["_cache_age_seconds"] = cache_age
+        usage_copy["_queried_at"] = queried_at
+        cached_usage[acc["uuid"]] = usage_copy
 
-            return {"account": acc, "usage": usage, "error": None, "refreshed_creds": refreshed_creds}
-        except Exception as exc:
-            return {"account": acc, "usage": None, "error": exc}
+    return cached_usage, missing_accounts
 
-    # Fetch uncached accounts in parallel
-    fetched_usage = {}
-    if accounts_to_fetch:
-        with ThreadPoolExecutor(max_workers=min(len(accounts_to_fetch), 10)) as executor:
-            futures = {executor.submit(fetch_from_api, acc): acc for acc in accounts_to_fetch}
-            for future in as_completed(futures):
-                result = future.result()
-                acc = result["account"]
-                if result["error"]:
-                    console.print(f"[yellow]Warning: Could not fetch usage for {acc['email']}: {result['error']}[/yellow]")
-                else:
-                    fetched_usage[acc["uuid"]] = result
 
-    # Process all accounts (cached + fetched) in main thread
+def _fetch_usage_for_account(acc: Dict[str, Any]) -> Dict[str, Any]:
+    refreshed_creds = refresh_token(acc["credentials_json"])
+    token = refreshed_creds.get("claudeAiOauth", {}).get("accessToken")
+    if not token:
+        raise ValueError("No access token")
+
+    usage = ClaudeAPI.get_usage(token)
+    usage.setdefault("_cache_source", "live")
+    usage["_cache_age_seconds"] = 0.0
+    usage["_queried_at"] = datetime.now(timezone.utc).isoformat()
+    return {"usage": usage, "refreshed_creds": refreshed_creds}
+
+
+def _fetch_usage_for_accounts(accounts: List[Dict[str, Any]], label: str) -> Dict[str, Dict[str, Any]]:
+    if not accounts:
+        return {}
+
+    results: Dict[str, Dict[str, Any]] = {}
+    max_workers = min(len(accounts), 10)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {executor.submit(_fetch_usage_for_account, acc): acc for acc in accounts}
+        for future in as_completed(future_map):
+            acc = future_map[future]
+            try:
+                payload = future.result()
+            except Exception as exc:
+                console.print(
+                    f"[yellow]Warning: Could not fetch usage for {acc['email']} ({label}): {exc}[/yellow]"
+                )
+                continue
+            results[acc["uuid"]] = payload
+
+    return results
+
+
+def _persist_usage_results(
+    db: Database, account_lookup: Dict[str, Dict[str, Any]], fetched_results: Dict[str, Dict[str, Any]]
+):
+    if not fetched_results:
+        return
+
+    cursor = db.conn.cursor()
+    for account_uuid, payload in fetched_results.items():
+        usage = payload.get("usage")
+        if not usage:
+            continue
+
+        usage_to_store = copy.deepcopy(usage)
+        usage_to_store.pop("_cache_source", None)
+        usage_to_store.pop("_cache_age_seconds", None)
+        usage_to_store.pop("_queried_at", None)
+        db.add_usage(account_uuid, usage_to_store)
+
+        refreshed_creds = payload.get("refreshed_creds")
+        if not refreshed_creds:
+            continue
+
+        account = account_lookup.get(account_uuid)
+        current_serialized = account.get("credentials_json") if account else None
+
+        current_creds: Optional[Dict[str, Any]] = None
+        if current_serialized:
+            try:
+                current_creds = json.loads(current_serialized)
+            except json.JSONDecodeError:
+                current_creds = None
+
+        if current_creds == refreshed_creds:
+            continue
+
+        serialized = json.dumps(refreshed_creds)
+        if account is not None:
+            account["credentials_json"] = serialized
+
+        cursor.execute(
+            "UPDATE accounts SET credentials_json = ?, updated_at = CURRENT_TIMESTAMP WHERE uuid = ?",
+            (serialized, account_uuid),
+        )
+    db.conn.commit()
+
+
+def _get_recent_session_counts(db: Database, minutes: int = 5) -> Dict[str, int]:
+    cursor = db.conn.cursor()
+    cursor.execute(
+        """
+        SELECT account_uuid, COUNT(*) as count
+        FROM sessions
+        WHERE account_uuid IS NOT NULL
+          AND datetime(created_at) >= datetime('now', '-' || ? || ' minutes')
+        GROUP BY account_uuid
+        """,
+        (minutes,),
+    )
+    return {row[0]: row[1] for row in cursor.fetchall()}
+
+
+def _build_candidate(
+    db: Database,
+    acc: Dict[str, Any],
+    usage_data: Dict[str, Any],
+    burst_cache: Dict[str, float],
+    active_counts: Dict[str, int],
+    recent_counts: Dict[str, int],
+    *,
+    refreshed: bool,
+) -> Optional[Dict[str, Any]]:
+    five_hour = usage_data.get("five_hour", {}) or {}
+    seven_day_opus = usage_data.get("seven_day_opus", {}) or {}
+    seven_day = usage_data.get("seven_day", {}) or {}
+
+    opus_util_raw = seven_day_opus.get("utilization")
+    overall_util_raw = seven_day.get("utilization")
+
+    opus_util = float(opus_util_raw) if opus_util_raw is not None else 100.0
+    overall_util = float(overall_util_raw) if overall_util_raw is not None else 100.0
+
+    if opus_util >= 99.0 and overall_util >= 99.0:
+        return None
+
+    if opus_util < 99.0:
+        window = "opus"
+        utilization = opus_util
+        resets_at = seven_day_opus.get("resets_at")
+        tier = 1
+    else:
+        window = "overall"
+        utilization = overall_util
+        resets_at = seven_day.get("resets_at")
+        tier = 2
+
+    hours_to_reset = _hours_until_reset(resets_at)
+    headroom = max(99.0 - utilization, 0.0)
+    drain_rate = headroom / max(hours_to_reset, 0.001) if headroom > 0 else 0.0
+
+    fresh_bonus = 0.0
+    if headroom > 0 and utilization < FRESH_UTILIZATION_THRESHOLD:
+        freshness = (FRESH_UTILIZATION_THRESHOLD - utilization) / FRESH_UTILIZATION_THRESHOLD
+        fresh_bonus = freshness * FRESH_ACCOUNT_MAX_BONUS
+
+    priority_drain = drain_rate + fresh_bonus
+
+    five_hour_util_raw = five_hour.get("utilization")
+    five_hour_util = float(five_hour_util_raw) if five_hour_util_raw is not None else 50.0
+
+    account_uuid = acc["uuid"]
+    active_sessions = active_counts.get(account_uuid, 0)
+    recent_sessions = recent_counts.get(account_uuid, 0)
+
+    expected_burst = burst_cache.get(account_uuid)
+    if expected_burst is None or refreshed:
+        expected_burst = db.get_usage_delta_percentile(account_uuid)
+        burst_cache[account_uuid] = expected_burst
+
+    burst_blocked = (utilization + expected_burst) >= BURST_THRESHOLD
+
+    five_hour_factor = 1.0
+    for threshold, factor in FIVE_HOUR_PENALTIES:
+        if five_hour_util >= threshold:
+            five_hour_factor = factor
+            break
+
+    adjusted_drain = priority_drain * five_hour_factor
+    cache_source = usage_data.get("_cache_source", "unknown")
+    cache_age = usage_data.get("_cache_age_seconds")
+
+    rank = (
+        adjusted_drain,
+        utilization,
+        -hours_to_reset,
+        -five_hour_util,
+        -active_sessions,
+        -recent_sessions,
+    )
+
+    return {
+        "account": acc,
+        "tier": tier,
+        "rank": rank,
+        "drain_rate": drain_rate,
+        "priority_drain": priority_drain,
+        "fresh_bonus": fresh_bonus,
+        "adjusted_drain": adjusted_drain,
+        "utilization": utilization,
+        "headroom": headroom,
+        "hours_to_reset": hours_to_reset,
+        "five_hour_utilization": five_hour_util,
+        "five_hour_factor": five_hour_factor,
+        "expected_burst": expected_burst,
+        "burst_blocked": burst_blocked,
+        "active_sessions": active_sessions,
+        "recent_sessions": recent_sessions,
+        "opus_usage": float(opus_util_raw) if opus_util_raw is not None else None,
+        "overall_usage": float(overall_util_raw) if overall_util_raw is not None else None,
+        "window": window,
+        "cache_source": cache_source,
+        "cache_age_seconds": cache_age,
+        "refreshed": refreshed,
+    }
+
+
+def _candidate_needs_refresh(candidate: Dict[str, Any]) -> bool:
+    if candidate.get("refreshed"):
+        return False
+
+    cache_source = candidate.get("cache_source")
+    cache_age = candidate.get("cache_age_seconds")
+    if cache_source == "live":
+        return False
+
+    if cache_age is not None and cache_age > STALE_CACHE_SECONDS:
+        return True
+
+    if candidate["priority_drain"] >= HIGH_DRAIN_REFRESH_THRESHOLD and (cache_age is None or cache_age > 10):
+        return True
+
+    return False
+
+
+def _build_candidates(
+    db: Database,
+    accounts: List[Dict[str, Any]],
+    usage_by_uuid: Dict[str, Dict[str, Any]],
+    active_counts: Dict[str, int],
+    recent_counts: Dict[str, int],
+    burst_cache: Dict[str, float],
+    refreshed_ids: Set[str],
+    *,
+    allow_refresh: bool,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    candidates: List[Dict[str, Any]] = []
+    refresh_accounts: List[Dict[str, Any]] = []
+
     for acc in accounts:
-        usage = None
-        was_just_fetched = False
+        usage = usage_by_uuid.get(acc["uuid"])
+        if not usage:
+            continue
 
-        # Get from cache or fetched results
-        if acc["uuid"] in cached_usage:
-            usage = cached_usage[acc["uuid"]]
-        elif acc["uuid"] in fetched_usage:
-            result = fetched_usage[acc["uuid"]]
-            usage = result["usage"]
-            was_just_fetched = True
+        candidate = _build_candidate(
+            db,
+            acc,
+            usage,
+            burst_cache,
+            active_counts,
+            recent_counts,
+            refreshed=acc["uuid"] in refreshed_ids,
+        )
 
-            # Store fresh data in DB (main thread)
-            usage_to_store = copy.deepcopy(usage)
-            usage_to_store.pop("_cache_source", None)
-            usage_to_store.pop("_cache_age_seconds", None)
-            usage_to_store.pop("_queried_at", None)
-            db.add_usage(acc["uuid"], usage_to_store)
-
-            # Update credentials if refreshed
-            if "refreshed_creds" in result:
-                refreshed_creds = result["refreshed_creds"]
-                credentials = json.loads(acc["credentials_json"])
-                if refreshed_creds != credentials:
-                    cursor = db.conn.cursor()
-                    cursor.execute(
-                        "UPDATE accounts SET credentials_json = ?, updated_at = CURRENT_TIMESTAMP WHERE uuid = ?",
-                        (json.dumps(refreshed_creds), acc["uuid"]),
-                    )
-                    db.conn.commit()
-        else:
-            continue  # Failed to fetch
-
-        candidate = build_candidate(acc, usage)
         if not candidate:
             continue
 
-        # Skip refresh if we just fetched fresh data
-        needs_refresh = False
-        if not was_just_fetched:
-            cache_source = candidate.get("cache_source")
-            cache_age = candidate.get("cache_age_seconds")
-            if cache_source != "live":
-                if cache_age is not None and cache_age > STALE_CACHE_SECONDS:
-                    needs_refresh = True
-                if candidate["priority_drain"] >= HIGH_DRAIN_REFRESH_THRESHOLD and (cache_age is None or cache_age > 10):
-                    needs_refresh = True
-
-        if needs_refresh:
-            try:
-                usage = get_account_usage(db, acc["uuid"], acc["credentials_json"], force=True)
-                candidate = build_candidate(acc, usage, refreshed=True)
-                if not candidate:
-                    continue
-            except Exception as exc:
-                console.print(f"[yellow]Warning: Refresh failed for {acc['email']}: {exc}[/yellow]")
-
         candidates.append(candidate)
 
+        if allow_refresh and _candidate_needs_refresh(candidate):
+            refresh_accounts.append(acc)
+
+    return candidates, refresh_accounts
+
+
+def _select_candidate(candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not candidates:
         return None
 
@@ -381,7 +461,6 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
     pool = cool_candidates if cool_candidates else pool
 
     pool.sort(key=lambda c: c["rank"], reverse=True)
-
     _log_balancer_candidates("load-balancer candidates", pool)
 
     top = pool[0]
@@ -392,9 +471,78 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
     ]
 
     if len(similar) > 1:
-        selected = _choose_round_robin(similar)
-    else:
-        selected = top
+        return _choose_round_robin(similar)
+
+    return top
+
+
+def select_account_with_load_balancing(db: Database, session_id: Optional[str] = None) -> Optional[Dict]:
+    _maybe_cleanup_sessions(db)
+
+    if session_id:
+        reused = _reuse_existing_session(db, session_id)
+        if reused:
+            return reused
+
+    raw_accounts = db.get_all_accounts()
+    if not raw_accounts:
+        return None
+
+    accounts = [dict(acc) for acc in raw_accounts]
+    account_lookup = {acc["uuid"]: acc for acc in accounts}
+
+    usage_by_uuid, accounts_needing_fetch = _collect_cached_usage(db, accounts)
+
+    initial_fetch_results = _fetch_usage_for_accounts(accounts_needing_fetch, label="initial fetch")
+    if initial_fetch_results:
+        _persist_usage_results(db, account_lookup, initial_fetch_results)
+        for account_uuid, payload in initial_fetch_results.items():
+            usage_by_uuid[account_uuid] = payload["usage"]
+
+    if not usage_by_uuid:
+        return None
+
+    active_counts = db.get_all_active_session_counts()
+    recent_counts = _get_recent_session_counts(db, minutes=5)
+    burst_cache: Dict[str, float] = {}
+    refreshed_ids: Set[str] = set()
+
+    candidates, refresh_accounts = _build_candidates(
+        db,
+        accounts,
+        usage_by_uuid,
+        active_counts,
+        recent_counts,
+        burst_cache,
+        refreshed_ids,
+        allow_refresh=True,
+    )
+
+    if refresh_accounts:
+        refresh_results = _fetch_usage_for_accounts(refresh_accounts, label="refresh")
+        if refresh_results:
+            _persist_usage_results(db, account_lookup, refresh_results)
+            for account_uuid, payload in refresh_results.items():
+                usage_by_uuid[account_uuid] = payload["usage"]
+                refreshed_ids.add(account_uuid)
+
+            candidates, _ = _build_candidates(
+                db,
+                accounts,
+                usage_by_uuid,
+                active_counts,
+                recent_counts,
+                burst_cache,
+                refreshed_ids,
+                allow_refresh=False,
+            )
+
+    if not candidates:
+        return None
+
+    selected = _select_candidate(candidates)
+    if not selected:
+        return None
 
     if session_id:
         db.assign_session_to_account(session_id, selected["account"]["uuid"])
