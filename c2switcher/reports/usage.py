@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
 from rich import box
+from rich.columns import Columns
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -219,126 +220,65 @@ def forecast_account(acc_df: pd.DataFrame, window_hours: int) -> Optional[Accoun
     )
 
 
-def overall_status_panel(forecasts: Iterable[AccountForecast]) -> Panel:
+@dataclass
+class FleetMetrics:
+    total_accounts: int
+    status_counts: Counter[str]
+    total_rate_7d: float
+    total_rate_opus: float
+    required_overall: int
+    required_opus: int
+    recommended_fleet: int
+    headroom: int
+    shortfall: int
+    at_risk_accounts: list[str]
+    soonest_limit: Optional[tuple[str, str, float]]
+    nearest_reset: Optional[float]
+
+
+def _usage_color(value: Optional[float]) -> str:
+    if value is None:
+        return "dim"
+    if value >= 90:
+        return "red"
+    if value >= 70:
+        return "yellow"
+    if value >= 40:
+        return "green"
+    return "cyan"
+
+
+def _colorize_percent(value: Optional[float]) -> str:
+    if value is None:
+        return "[dim]--[/dim]"
+    color = _usage_color(value)
+    return f"[{color}]{value:.0f}%[/]"
+
+
+def _colorize_rate(rate: float) -> str:
+    if rate >= 2:
+        return f"[red]{rate:.2f}%/h[/red]"
+    if rate >= 1:
+        return f"[yellow]{rate:.2f}%/h[/yellow]"
+    if rate > 0:
+        return f"[green]{rate:.2f}%/h[/green]"
+    return "[dim]0.00%/h[/dim]"
+
+
+def _usage_bar(value: Optional[float], width: int = 12) -> str:
+    if value is None:
+        return "[dim]" + "·" * width + "[/dim]"
+    capped = max(0.0, min(100.0, value))
+    filled = int(round((capped / 100.0) * width))
+    filled = min(width, max(0, filled))
+    bar = "█" * filled + "·" * (width - filled)
+    color = _usage_color(capped)
+    return f"[{color}]{bar}[/{color}]"
+
+
+def compute_fleet_metrics(forecasts: Iterable[AccountForecast]) -> FleetMetrics:
     forecasts = list(forecasts)
-    safe = sum(1 for f in forecasts if f.status.startswith("🟢"))
-    warning = sum(1 for f in forecasts if f.status.startswith("🟡"))
-    critical = sum(1 for f in forecasts if f.status.startswith("🔴"))
-
-    if critical:
-        color = "red"
-        message = f"{critical} account(s) critical; rotate immediately."
-    elif warning:
-        color = "yellow"
-        message = f"{warning} account(s) trending up; plan fallback."
-    else:
-        color = "green"
-        message = f"All {safe} account(s) stable."
-
-    limit_counts = Counter(f.first_limit_type for f in forecasts if f.first_limit_type)
-    limit_summary_parts = []
-    for label in ("7-day overall", "7-day Opus"):
-        count = limit_counts.get(label)
-        if count:
-            limit_summary_parts.append(f"{count}× {label}")
-    other_parts = [
-        f"{count}× {label}"
-        for label, count in limit_counts.items()
-        if label not in {"7-day overall", "7-day Opus"}
-    ]
-    limit_summary_parts.extend(other_parts)
-    limit_summary = ", ".join(limit_summary_parts)
-
-    reset_candidates = []
-    for f in forecasts:
-        if f.hours_until_7d_reset is not None:
-            reset_candidates.append(f.hours_until_7d_reset)
-        if f.hours_until_opus_reset is not None:
-            reset_candidates.append(f.hours_until_opus_reset)
-
-    body_lines = [f"[bold]{message}[/]"]
-    if limit_summary:
-        body_lines.append(f"Upcoming limits: {limit_summary}")
-    if reset_candidates:
-        body_lines.append(f"Nearest reset in {format_horizon(min(reset_candidates))}.")
-
-    body = "\n".join(body_lines)
-    return Panel(body, title="Fleet Health", border_style=color, box=box.ROUNDED)
-
-
-def accounts_table(forecasts: Iterable[AccountForecast]) -> Table:
-    table = Table(
-        title="Account Burn Forecast",
-        box=box.MINIMAL_DOUBLE_HEAD,
-        show_lines=False,
-        pad_edge=False,
-    )
-    table.add_column("Account", style="bold")
-    table.add_column("Status")
-    table.add_column("7d", justify="right")
-    table.add_column("Opus", justify="right")
-    table.add_column("5h", justify="right")
-    table.add_column("7d Rate", justify="right")
-    table.add_column("Opus Rate", justify="right")
-    table.add_column("First Limit", justify="left")
-    table.add_column("7d Reset", justify="right")
-    table.add_column("Opus Reset", justify="right")
-    table.add_column("Action", justify="left")
-
-    for f in forecasts:
-        if f.first_limit_type:
-            limit_eta = f"{f.first_limit_type} → {format_horizon(f.first_limit_hours)}"
-        else:
-            limit_eta = "Resets first"
-        action = f.headline
-
-        table.add_row(
-            f.account,
-            f.status,
-            f"{f.current_7d:.0f}%",
-            f"{f.current_opus:.0f}%",
-            f"{f.current_5h:.0f}%",
-            f"{f.rate_7d:.2f}%/h",
-            f"{f.rate_opus:.2f}%/h",
-            limit_eta,
-            format_horizon(f.hours_until_7d_reset),
-            format_horizon(f.hours_until_opus_reset),
-            action,
-        )
-    return table
-
-
-def quick_recos_panel(forecasts: Iterable[AccountForecast]) -> Panel:
-    lines = []
-    for f in forecasts:
-        if f.first_limit_type:
-            horizon = format_horizon(f.first_limit_hours)
-            if f.first_limit_hours < 6:
-                lines.append(f"[bold]{f.account}[/] hits {f.first_limit_type} in {horizon} — rotate now.")
-            elif f.first_limit_hours < 24:
-                lines.append(f"[bold]{f.account}[/] {f.first_limit_type} limit in {horizon} — prep fallback.")
-            else:
-                lines.append(f"[bold]{f.account}[/] trending toward {f.first_limit_type} in {horizon} — monitor.")
-        elif f.rate_7d > 0.5 or f.rate_opus > 0.5:
-            lines.append(f"[bold]{f.account}[/] rising quickly but resets first — keep an eye on burn rate.")
-        if f.current_5h > 80:
-            lines.append(f"[bold]{f.account}[/] five-hour window above 80%; give it a breather.")
-    if not lines:
-        lines = ["All accounts have comfortable margins. Keep monitoring every few hours."]
-    body = "\n".join(f"- {line}" for line in lines)
-    return Panel(body, title="Playbook", border_style="cyan", box=box.ROUNDED)
-
-
-def fleet_capacity_panel(forecasts: Iterable[AccountForecast]) -> Panel:
-    forecasts = list(forecasts)
-    if not forecasts:
-        return Panel(
-            "[dim]No accounts available to assess capacity.[/]",
-            title="Fleet Capacity",
-            border_style="magenta",
-            box=box.ROUNDED,
-        )
-
+    status_counts: Counter[str] = Counter(f.status for f in forecasts)
     per_account_capacity = 100 / (7 * 24)
 
     total_rate_7d = sum(max(f.rate_7d, 0.0) for f in forecasts)
@@ -353,50 +293,232 @@ def fleet_capacity_panel(forecasts: Iterable[AccountForecast]) -> Panel:
     required_opus = required_accounts(total_rate_opus)
     recommended_fleet = max(required_overall, required_opus)
 
-    at_risk_accounts = [f for f in forecasts if f.hits_7d_before_reset or f.hits_opus_before_reset]
-    projected_available = len(forecasts) - len(at_risk_accounts)
-    projected_shortfall = max(0, recommended_fleet - projected_available)
+    at_risk_accounts = [f.account for f in forecasts if f.hits_7d_before_reset or f.hits_opus_before_reset]
 
-    limit_horizons = [
-        f.first_limit_hours
+    limit_candidates = [
+        (f.account, f.first_limit_type, f.first_limit_hours)
         for f in forecasts
         if f.first_limit_type and f.first_limit_hours != float("inf")
     ]
-    soonest_limit = min(limit_horizons) if limit_horizons else None
+    soonest_limit = min(limit_candidates, key=lambda item: item[2]) if limit_candidates else None
 
-    lines = [f"[bold]Accounts on roster:[/] {len(forecasts)}"]
+    reset_candidates = [
+        value
+        for f in forecasts
+        for value in (f.hours_until_7d_reset, f.hours_until_opus_reset)
+        if value is not None
+    ]
+    nearest_reset = min(reset_candidates) if reset_candidates else None
 
-    if total_rate_7d > 0:
-        lines.append(f"7d Sonnet burn: {total_rate_7d:.2f}%/h → needs {required_overall} account(s)")
+    headroom = max(0, len(forecasts) - recommended_fleet) if recommended_fleet else len(forecasts)
+    shortfall = max(0, recommended_fleet - len(forecasts))
+
+    return FleetMetrics(
+        total_accounts=len(forecasts),
+        status_counts=status_counts,
+        total_rate_7d=total_rate_7d,
+        total_rate_opus=total_rate_opus,
+        required_overall=required_overall,
+        required_opus=required_opus,
+        recommended_fleet=recommended_fleet,
+        headroom=headroom,
+        shortfall=shortfall,
+        at_risk_accounts=at_risk_accounts,
+        soonest_limit=soonest_limit,
+        nearest_reset=nearest_reset,
+    )
+
+
+def fleet_snapshot_panel(metrics: FleetMetrics) -> Panel:
+    status_order = ["🔴 Critical", "🟡 Watch", "🟢 OK", "🟢 Reset"]
+    status_parts = []
+    for status in status_order:
+        count = metrics.status_counts.get(status, 0)
+        if count:
+            status_parts.append(f"{count}× {status}")
+    remaining = [
+        (status, count) for status, count in metrics.status_counts.items() if status not in status_order and count
+    ]
+    for status, count in remaining:
+        status_parts.append(f"{count}× {status}")
+
+    headline_parts = [f"[bold]{metrics.total_accounts}[/] account(s) online"]
+    if status_parts:
+        headline_parts.append(" / ".join(status_parts))
+
+    lines = [" ".join(headline_parts)]
+
+    lines.append(
+        f"Burn (7d/Opus): {metrics.total_rate_7d:.2f}%/h / {metrics.total_rate_opus:.2f}%/h"
+    )
+
+    if metrics.recommended_fleet:
+        lines.append(f"Recommended fleet: {metrics.recommended_fleet} account(s)")
+        if metrics.shortfall > 0:
+            lines.append(f"[red]Shortfall:[/] add {metrics.shortfall} account(s) (Opus/Sonnet burn exceeds supply)")
+        else:
+            lines.append(f"Headroom: {metrics.headroom} account(s)")
     else:
-        lines.append("7d Sonnet burn: [dim]idle[/dim]")
+        lines.append("Recommended fleet: [dim]idle[/dim]")
 
-    if total_rate_opus > 0:
-        lines.append(f"7d Opus burn: {total_rate_opus:.2f}%/h → needs {required_opus} account(s)")
+    if metrics.at_risk_accounts:
+        soonest = metrics.soonest_limit
+        if soonest:
+            account, label, hours = soonest
+            lines.append(f"Soonest limit: {account} {label} in {format_horizon(hours)}")
+        else:
+            lines.append("Some accounts may cap before reset; monitor burn closely.")
     else:
-        lines.append("7d Opus burn: [dim]idle[/dim]")
+        lines.append("No accounts projected to hit limits before their resets.")
 
-    if recommended_fleet > 0:
-        lines.append(f"[bold]Recommended fleet size:[/] {recommended_fleet} account(s)")
+    if metrics.nearest_reset is not None:
+        lines.append(f"Nearest reset: {format_horizon(metrics.nearest_reset)}")
 
-    if len(forecasts) >= recommended_fleet:
-        headroom = len(forecasts) - recommended_fleet
-        lines.append(f"Current headroom: {headroom} account(s)")
+    return Panel("\n".join(lines), title="Fleet Snapshot", border_style="cyan", box=box.ROUNDED)
+
+
+def account_card(forecast: AccountForecast) -> Panel:
+    status_border = {
+        "🔴 Critical": "red",
+        "🟡 Watch": "yellow",
+        "🟢 OK": "green",
+        "🟢 Reset": "green",
+    }.get(forecast.status, "cyan")
+
+    lines = [
+        f"{forecast.status} [bold]{forecast.account}[/]",
+        f"{_usage_bar(forecast.current_7d)} {_colorize_percent(forecast.current_7d)} "
+        f"7d • {_colorize_rate(forecast.rate_7d)}",
+        f"{_usage_bar(forecast.current_opus)} {_colorize_percent(forecast.current_opus)} "
+        f"Opus • {_colorize_rate(forecast.rate_opus)}",
+    ]
+
+    lines.append(
+        f"Resets: 7d {format_horizon(forecast.hours_until_7d_reset)} • "
+        f"Opus {format_horizon(forecast.hours_until_opus_reset)}"
+    )
+
+    if forecast.first_limit_type:
+        lines.append(f"Limit: {format_horizon(forecast.first_limit_hours)} → {forecast.first_limit_type}")
     else:
-        lines.append(f"[red]Shortfall today:[/] add {recommended_fleet - len(forecasts)} account(s)")
+        lines.append("Limit: Resets first")
 
-    if at_risk_accounts:
-        lines.append(
-            f"Projected drop-offs: {len(at_risk_accounts)} account(s) hit limits before reset "
-            f"({format_horizon(soonest_limit)} earliest)."
+    gap = forecast.current_opus - forecast.current_7d
+    if abs(gap) >= 8:
+        if gap > 0:
+            lines.append(f"Opus +{abs(gap):.0f}% vs 7d")
+        else:
+            lines.append(f"7d +{abs(gap):.0f}% vs Opus")
+
+    if forecast.current_5h >= 60:
+        lines.append(f"5h window {forecast.current_5h:.0f}% — consider resting soon.")
+
+    lines.append(f"Next: {forecast.headline}")
+
+    return Panel("\n".join(lines), border_style=status_border, box=box.ROUNDED, padding=(0, 1))
+
+
+def account_overview_columns(forecasts: Iterable[AccountForecast]) -> Columns:
+    cards = [account_card(f) for f in forecasts]
+    return Columns(cards, expand=True, equal=True)
+
+
+def limit_outlook_table(forecasts: Iterable[AccountForecast]) -> Optional[Table]:
+    rows = []
+    severity_order = {
+        "🔴 Critical": 0,
+        "🟡 Watch": 1,
+        "🟢 OK": 2,
+        "🟢 Reset": 3,
+    }
+
+    for f in forecasts:
+        reset_candidates = [
+            val for val in (f.hours_until_7d_reset, f.hours_until_opus_reset) if val is not None
+        ]
+        reset_eta = min(reset_candidates) if reset_candidates else None
+
+        if f.first_limit_type:
+            threat = f.first_limit_type
+            eta_hours = f.first_limit_hours
+            eta_display = format_horizon(f.first_limit_hours)
+        else:
+            threat = "Resets first"
+            eta_hours = reset_eta if reset_eta is not None else float("inf")
+            eta_display = f"Reset in {format_horizon(reset_eta)}" if reset_eta is not None else "Steady"
+
+        rows.append(
+            {
+                "forecast": f,
+                "severity": severity_order.get(f.status, 2),
+                "eta_hours": eta_hours,
+                "eta_display": eta_display,
+                "threat": threat,
+                "reset_eta": reset_eta,
+            }
         )
-        if projected_shortfall > 0:
-            lines.append(f"[yellow]Action:[/] secure {projected_shortfall} additional account(s) soon.")
-    else:
-        lines.append("No accounts expected to cap before their resets.")
 
-    body = "\n".join(lines)
-    return Panel(body, title="Fleet Capacity", border_style="magenta", box=box.ROUNDED)
+    rows.sort(key=lambda item: (item["severity"], item["eta_hours"]))
+
+    table = Table(
+        title="Limit Outlook",
+        box=box.MINIMAL_DOUBLE_HEAD,
+        show_lines=False,
+        pad_edge=False,
+    )
+    table.add_column("Account", style="bold")
+    table.add_column("Threat", justify="left")
+    table.add_column("ETA", justify="left")
+    table.add_column("Reset", justify="right")
+    table.add_column("7d", justify="right")
+    table.add_column("Opus", justify="right")
+    table.add_column("7d Rate", justify="right")
+    table.add_column("Opus Rate", justify="right")
+
+    for item in rows:
+        f = item["forecast"]
+        reset_display = format_horizon(item["reset_eta"]) if item["reset_eta"] is not None else "—"
+        table.add_row(
+            f"{f.status} {f.account}",
+            item["threat"],
+            item["eta_display"],
+            reset_display,
+            _colorize_percent(f.current_7d),
+            _colorize_percent(f.current_opus),
+            _colorize_rate(f.rate_7d),
+            _colorize_rate(f.rate_opus),
+        )
+
+    return table
+
+
+def playbook_panel(forecasts: Iterable[AccountForecast], metrics: FleetMetrics) -> Panel:
+    lines = []
+
+    if metrics.shortfall > 0:
+        lines.append(f"[bold red]Add {metrics.shortfall} account(s) to match current Opus/Sonnet burn.[/bold red]")
+
+    for f in forecasts:
+        if f.first_limit_type:
+            horizon = format_horizon(f.first_limit_hours)
+            if f.first_limit_hours < 6:
+                lines.append(f"[bold]{f.account}[/] will cap {f.first_limit_type} in {horizon} — rotate now.")
+            elif f.first_limit_hours < 24:
+                lines.append(f"[bold]{f.account}[/] hits {f.first_limit_type} in {horizon} — prep fallback.")
+            else:
+                lines.append(f"[bold]{f.account}[/] trending toward {f.first_limit_type} in {horizon}; monitor.")
+        elif f.rate_opus > 0.5 or f.rate_7d > 0.5:
+            lines.append(
+                f"[bold]{f.account}[/] burning quickly but resets first — check sessions (~{f.rate_opus:.2f}%/h Opus)."
+            )
+        if f.current_5h > 80:
+            lines.append(f"[bold]{f.account}[/] five-hour window {f.current_5h:.0f}% — give it breathing room.")
+
+    if not lines:
+        lines = ["All accounts have comfortable margins. Keep monitoring periodically."]
+
+    body = "\n".join(f"- {line}" for line in lines)
+    return Panel(body, title="Playbook", border_style="cyan", box=box.ROUNDED)
 
 
 def create_visualizations(df: pd.DataFrame, forecasts: Iterable[AccountForecast], output_path: Path, show: bool) -> None:
@@ -669,13 +791,15 @@ def generate_usage_report(
 
     forecasts.sort(key=sort_key)
 
-    console.print(overall_status_panel(forecasts))
+    metrics = compute_fleet_metrics(forecasts)
+
+    console.print(fleet_snapshot_panel(metrics))
     console.print()
-    console.print(fleet_capacity_panel(forecasts))
+    console.print(account_overview_columns(forecasts))
     console.print()
-    console.print(accounts_table(forecasts))
+    console.print(limit_outlook_table(forecasts))
     console.print()
-    console.print(quick_recos_panel(forecasts))
+    console.print(playbook_panel(forecasts, metrics))
 
     console.print("\n[bold cyan]Building visualization…[/]")
     create_visualizations(df, forecasts, output_path, show)
