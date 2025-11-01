@@ -57,7 +57,7 @@ def load_usage_history(db_path: Path) -> pd.DataFrame:
         "seven_day_opus_resets_at",
     ]
     for col in time_cols:
-        df[col] = pd.to_datetime(df[col], utc=True, errors="coerce").dt.tz_localize(None)
+        df.loc[:, col] = pd.to_datetime(df[col], utc=True, errors="coerce").dt.tz_localize(None)
 
     df["account"] = df["nickname"].fillna(df["display_name"]).fillna("unknown")
     numeric_cols = [
@@ -66,7 +66,7 @@ def load_usage_history(db_path: Path) -> pd.DataFrame:
         "seven_day_opus_utilization",
     ]
     for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+        df.loc[:, col] = pd.to_numeric(df[col], errors="coerce")
 
     return df
 
