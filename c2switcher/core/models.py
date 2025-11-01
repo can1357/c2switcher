@@ -219,6 +219,9 @@ class Candidate:
    headroom: float
    hours_to_reset: float
    drain_rate: float
+   expected_utilization: float
+   pace_gap: float
+   pace_adjustment: float
    fresh_bonus: float
    priority_drain: float
    five_hour_utilization: float
@@ -264,6 +267,9 @@ class SelectionDecision:
    headroom: float
    hours_to_reset: float
    drain_rate: float
+   expected_utilization: float
+   pace_gap: float
+   pace_adjustment: float
    priority_drain: float
    fresh_bonus: float
    adjusted_drain: float
@@ -291,6 +297,9 @@ class SelectionDecision:
          headroom=candidate.headroom,
          hours_to_reset=candidate.hours_to_reset,
          drain_rate=candidate.drain_rate,
+         expected_utilization=candidate.expected_utilization,
+         pace_gap=candidate.pace_gap,
+         pace_adjustment=candidate.pace_adjustment,
          priority_drain=candidate.priority_drain,
          fresh_bonus=candidate.fresh_bonus,
          adjusted_drain=candidate.adjusted_drain,

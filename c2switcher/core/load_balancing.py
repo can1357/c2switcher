@@ -17,6 +17,10 @@ FIVE_HOUR_ROTATION_CAP = 90.0
 BURST_THRESHOLD = 94.0
 FRESH_UTILIZATION_THRESHOLD = 25.0
 FRESH_ACCOUNT_MAX_BONUS = 3.0
+WINDOW_LENGTH_HOURS = 168.0
+PACE_GAIN = 1.0
+PACE_AHEAD_DAMPING = 0.5
+MAX_PACE_ADJUSTMENT = 4.0
 
 
 def build_candidate(
@@ -57,15 +61,29 @@ def build_candidate(
 
    # Core metrics
    headroom = max(99.0 - utilization, 0.0)
-   drain_rate = headroom / max(hours_to_reset, 0.001) if headroom > 0 else 0.0
+   effective_hours_left = max(hours_to_reset, 0.001)
+   drain_rate = headroom / effective_hours_left if headroom > 0 else 0.0
+
+   # Pace alignment: how far ahead/behind of schedule this account is
+   window_hours = WINDOW_LENGTH_HOURS
+   elapsed_hours = max(window_hours - min(hours_to_reset, window_hours), 0.0)
+   expected_utilization = (elapsed_hours / window_hours) * 100.0
+   expected_utilization = max(0.0, min(expected_utilization, 100.0))
+   pace_gap = expected_utilization - utilization
+   pace_adjustment = 0.0
+   if headroom > 0:
+      pace_adjustment = (pace_gap / effective_hours_left) * PACE_GAIN
+      if pace_gap < 0:
+         pace_adjustment *= PACE_AHEAD_DAMPING
+      pace_adjustment = max(min(pace_adjustment, MAX_PACE_ADJUSTMENT), -MAX_PACE_ADJUSTMENT)
 
    # Fresh account bonus
    fresh_bonus = 0.0
-   if headroom > 0 and utilization < FRESH_UTILIZATION_THRESHOLD:
+   if headroom > 0 and utilization < FRESH_UTILIZATION_THRESHOLD and pace_gap > 0:
       freshness = (FRESH_UTILIZATION_THRESHOLD - utilization) / FRESH_UTILIZATION_THRESHOLD
       fresh_bonus = freshness * FRESH_ACCOUNT_MAX_BONUS
 
-   priority_drain = drain_rate + fresh_bonus
+   priority_drain = drain_rate + pace_adjustment + fresh_bonus
 
    # 5-hour penalty
    five_hour_util_raw = usage.five_hour.utilization
@@ -92,6 +110,9 @@ def build_candidate(
       headroom=headroom,
       hours_to_reset=hours_to_reset,
       drain_rate=drain_rate,
+      expected_utilization=expected_utilization,
+      pace_gap=pace_gap,
+      pace_adjustment=pace_adjustment,
       fresh_bonus=fresh_bonus,
       priority_drain=priority_drain,
       five_hour_utilization=five_hour_util,
