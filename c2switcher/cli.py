@@ -115,8 +115,8 @@ def add(nickname: Optional[str], creds_file: Optional[str]):
 @click.option("--token-only", is_flag=True, help="Output only the token to stdout")
 def optimal(switch: bool, session_id: Optional[str], token_only: bool):
     """Find the optimal account with load balancing and session stickiness."""
-    if switch or session_id:
-        acquire_lock()
+    # Always guard token refresh work so concurrent invocations cannot race.
+    acquire_lock()
 
     db = Database()
 
@@ -228,8 +228,7 @@ def switch(identifier: Optional[str], session_id: Optional[str], token_only: boo
         console.print("[red]Error: Must provide either an identifier or --session-id for load balancing[/red]")
         return
 
-    if not token_only or session_id:
-        acquire_lock()
+    acquire_lock()
 
     db = Database()
 
@@ -296,6 +295,7 @@ def switch(identifier: Optional[str], session_id: Optional[str], token_only: boo
 @click.argument("identifier", required=False)
 def force_refresh(identifier: Optional[str]):
     """Force refresh tokens for an account (or all accounts if none specified)."""
+    acquire_lock()
     db = Database()
 
     try:
