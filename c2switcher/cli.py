@@ -161,6 +161,11 @@ def optimal(dry_run: bool, session_id: Optional[str], token_only: bool, quiet: b
                 db.conn.commit()
             optimal_creds = refreshed_creds
 
+        # Perform credential switch BEFORE output formatting (not token_only, not dry_run)
+        if should_switch and not token_only and optimal_creds:
+            CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(CREDENTIALS_PATH, optimal_creds)
+
         if output_json:
             json_output = {
                 "index": account["index_num"],
@@ -230,18 +235,15 @@ def optimal(dry_run: bool, session_id: Optional[str], token_only: bool, quiet: b
 
         info_text += session_info
 
+        # Non-JSON output path (credentials already written above if needed)
         if token_only:
             if not quiet:
                 console.print(Panel(info_text, border_style="green"))
             print(token)
-        elif should_switch:
-            CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(CREDENTIALS_PATH, optimal_creds)
-            console.print(Panel(info_text, border_style="green"))
-            if not session_id:
-                console.print("[green]✓[/green] Switched to optimal account")
         else:
             console.print(Panel(info_text, border_style="green"))
+            if should_switch and not session_id:
+                console.print("[green]✓[/green] Switched to optimal account")
 
     except Exception as exc:
         console.print(f"[red]Error: {exc}[/red]")
@@ -305,6 +307,11 @@ def switch(identifier: Optional[str], session_id: Optional[str], token_only: boo
             )
             db.conn.commit()
 
+        # Perform credential switch BEFORE output formatting (unless token_only)
+        if not token_only:
+            CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(CREDENTIALS_PATH, refreshed_creds)
+
         if output_json:
             json_output = {
                 "index": account["index_num"],
@@ -329,8 +336,6 @@ def switch(identifier: Optional[str], session_id: Optional[str], token_only: boo
                 console.print(Panel(panel_content, border_style="green"))
                 print(token)
             else:
-                CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
-                atomic_write_json(CREDENTIALS_PATH, refreshed_creds)
                 console.print(Panel(panel_content, border_style="green"))
 
     finally:

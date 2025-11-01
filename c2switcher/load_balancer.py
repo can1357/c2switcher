@@ -237,28 +237,93 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
             "refreshed": refreshed,
         }
 
-    def fetch_usage(acc: Dict) -> Optional[Dict]:
+    # Check cache in main thread first
+    import copy
+    accounts_to_fetch = []
+    cached_usage = {}
+
+    for acc in accounts:
+        cached = db.get_recent_usage(acc["uuid"], max_age_seconds=300)
+        if cached:
+            usage, queried_at = cached
+            usage_copy = copy.deepcopy(usage)
+            cache_age = None
+            try:
+                cache_dt = datetime.fromisoformat(queried_at.replace("Z", "+00:00"))
+                cache_age = max((datetime.now(timezone.utc) - cache_dt).total_seconds(), 0)
+            except Exception:
+                cache_age = None
+            usage_copy.setdefault("_cache_source", "cache")
+            usage_copy["_cache_age_seconds"] = cache_age
+            usage_copy["_queried_at"] = queried_at
+            cached_usage[acc["uuid"]] = usage_copy
+        else:
+            accounts_to_fetch.append(acc)
+
+    # Parallel fetch from API (HTTP only, no DB)
+    def fetch_from_api(acc: Dict) -> Dict:
+        """Pure HTTP fetch - zero DB access."""
         try:
-            usage = get_account_usage(db, acc["uuid"], acc["credentials_json"])
-            return {"account": acc, "usage": usage, "error": None}
+            from .tokens import refresh_token
+            from .api import ClaudeAPI
+            refreshed_creds = refresh_token(acc["credentials_json"])
+            token = refreshed_creds.get("claudeAiOauth", {}).get("accessToken")
+            if not token:
+                raise ValueError("No access token")
+
+            usage = ClaudeAPI.get_usage(token)
+            usage.setdefault("_cache_source", "live")
+            usage["_cache_age_seconds"] = 0.0
+            usage["_queried_at"] = datetime.now(timezone.utc).isoformat()
+
+            return {"account": acc, "usage": usage, "error": None, "refreshed_creds": refreshed_creds}
         except Exception as exc:
             return {"account": acc, "usage": None, "error": exc}
 
-    with ThreadPoolExecutor(max_workers=min(len(accounts), 10)) as executor:
-        futures = {executor.submit(fetch_usage, acc): acc for acc in accounts}
-        usage_results = []
-        for future in as_completed(futures):
-            result = future.result()
-            usage_results.append(result)
+    # Fetch uncached accounts in parallel
+    fetched_usage = {}
+    if accounts_to_fetch:
+        with ThreadPoolExecutor(max_workers=min(len(accounts_to_fetch), 10)) as executor:
+            futures = {executor.submit(fetch_from_api, acc): acc for acc in accounts_to_fetch}
+            for future in as_completed(futures):
+                result = future.result()
+                acc = result["account"]
+                if result["error"]:
+                    console.print(f"[yellow]Warning: Could not fetch usage for {acc['email']}: {result['error']}[/yellow]")
+                else:
+                    fetched_usage[acc["uuid"]] = result
 
-    for result in usage_results:
-        acc = result["account"]
-        usage = result["usage"]
-        error = result["error"]
+    # Process all accounts (cached + fetched) in main thread
+    for acc in accounts:
+        usage = None
 
-        if error:
-            console.print(f"[yellow]Warning: Could not fetch usage for {acc['email']}: {error}[/yellow]")
-            continue
+        # Get from cache or fetched results
+        if acc["uuid"] in cached_usage:
+            usage = cached_usage[acc["uuid"]]
+        elif acc["uuid"] in fetched_usage:
+            result = fetched_usage[acc["uuid"]]
+            usage = result["usage"]
+
+            # Store fresh data in DB (main thread)
+            usage_to_store = copy.deepcopy(usage)
+            usage_to_store.pop("_cache_source", None)
+            usage_to_store.pop("_cache_age_seconds", None)
+            usage_to_store.pop("_queried_at", None)
+            db.add_usage(acc["uuid"], usage_to_store)
+
+            # Update credentials if refreshed
+            if "refreshed_creds" in result:
+                refreshed_creds = result["refreshed_creds"]
+                credentials = json.loads(acc["credentials_json"])
+                if refreshed_creds != credentials:
+                    cursor = db.conn.cursor()
+                    cursor.execute(
+                        "UPDATE accounts SET credentials_json = ?, updated_at = CURRENT_TIMESTAMP WHERE uuid = ?",
+                        (json.dumps(refreshed_creds), acc["uuid"]),
+                    )
+                    db.conn.commit()
+        else:
+            continue  # Failed to fetch
 
         candidate = build_candidate(acc, usage)
         if not candidate:
