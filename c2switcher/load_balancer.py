@@ -9,8 +9,10 @@ from typing import Any, Dict, List, Optional
 
 from .constants import (
     BURST_THRESHOLD,
-    FIVE_HOUR_PENALTIES,
+    FIVE_HOUR_MULTIPLIERS,
     FIVE_HOUR_ROTATION_CAP,
+    FRESH_ACCOUNT_MAX_BONUS,
+    FRESH_UTILIZATION_THRESHOLD,
     HIGH_DRAIN_REFRESH_THRESHOLD,
     LB_STATE_PATH,
     SIMILAR_DRAIN_THRESHOLD,
@@ -25,15 +27,18 @@ from .utils import atomic_write_json
 
 def _hours_until_reset(reset_iso: Optional[str]) -> float:
     if not reset_iso:
-        return 24.0  # Assume 24h for missing reset (favors fresh accounts)
+        return 168.0  # Fall back to 7 days when reset timestamp is missing
     try:
         reset_dt = datetime.fromisoformat(reset_iso.replace("Z", "+00:00"))
         if reset_dt.tzinfo is None:
             reset_dt = reset_dt.replace(tzinfo=timezone.utc)
         hours = (reset_dt - datetime.now(timezone.utc)).total_seconds() / 3600.0
+        # If reset is in past, return 0.1 hours (high urgency) instead of clamping to 1 minute
+        if hours < 0:
+            return 0.1
         return max(hours, 1.0 / 60.0)
     except Exception:
-        return 24.0  # Assume 24h on error (favors fresh accounts)
+        return 168.0  # Fall back to 7 days on parse errors
 
 
 def _load_balancer_state() -> Dict[str, Any]:
@@ -71,10 +76,14 @@ def _choose_round_robin(candidates: List[Dict]) -> Dict:
 
     next_idx = 0
     if last_uuid:
-        for idx, cand in enumerate(candidates):
-            if cand["account"]["uuid"] == last_uuid:
-                next_idx = (idx + 1) % len(candidates)
-                break
+        candidate_uuids = [c["account"]["uuid"] for c in candidates]
+        if last_uuid not in candidate_uuids:
+            last_uuid = None
+        else:
+            for idx, cand in enumerate(candidates):
+                if cand["account"]["uuid"] == last_uuid:
+                    next_idx = (idx + 1) % len(candidates)
+                    break
 
     selected = candidates[next_idx]
     rr_state[window] = selected["account"]["uuid"]
@@ -92,11 +101,11 @@ def _log_balancer_candidates(label: str, candidates: List[Dict]):
         age_str = f"{cache_age:.0f}s" if isinstance(cache_age, (int, float)) and cache_age is not None else "-"
         info = (
             f"- {acc['email']}: tier={cand['tier']} drain={cand['drain_rate']:.3f} adj={cand['adjusted_drain']:.3f} "
-            f"pen={cand['five_hour_penalty']:.2f} util={cand['utilization']:.1f} headroom={cand['headroom']:.1f} "
-            f"burst={cand['expected_burst']:.1f} blocked={int(cand['burst_blocked'])} "
-            f"hours={cand['hours_to_reset']:.1f} five_hour={cand['five_hour_utilization']:.1f} "
-            f"active={cand['active_sessions']} recent={cand['recent_sessions']} "
-            f"cache={cand.get('cache_source', '?')} age={age_str}"
+            f"bonus={cand['fresh_bonus']:.2f} mult={cand['five_hour_multiplier']:.2f} util={cand['utilization']:.1f} "
+            f"headroom={cand['headroom']:.1f} burst={cand['expected_burst']:.1f} "
+            f"blocked={int(cand['burst_blocked'])} hours={cand['hours_to_reset']:.1f} "
+            f"five_hour={cand['five_hour_utilization']:.1f} active={cand['active_sessions']} "
+            f"recent={cand['recent_sessions']} cache={cand.get('cache_source', '?')} age={age_str}"
         )
         if cand.get("refreshed"):
             info += " [green](refreshed)[/green]"
@@ -160,6 +169,13 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
             headroom = max(99.0 - utilization, 0.0)
             drain_rate = headroom / max(hours_to_reset, 0.001) if headroom > 0 else 0.0
 
+            fresh_bonus = 0.0
+            if headroom > 0 and utilization < FRESH_UTILIZATION_THRESHOLD:
+                freshness = (FRESH_UTILIZATION_THRESHOLD - utilization) / FRESH_UTILIZATION_THRESHOLD
+                fresh_bonus = freshness * FRESH_ACCOUNT_MAX_BONUS
+
+            priority_drain = drain_rate + fresh_bonus
+
             five_hour_util_raw = five_hour.get("utilization")
             five_hour_util = float(five_hour_util_raw) if five_hour_util_raw is not None else 0.0
 
@@ -176,13 +192,13 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
 
             burst_blocked = (utilization + expected_burst) >= BURST_THRESHOLD
 
-            five_hour_penalty = 0.0
-            for threshold, penalty in FIVE_HOUR_PENALTIES:
+            five_hour_multiplier = 1.0
+            for threshold, multiplier in FIVE_HOUR_MULTIPLIERS:
                 if five_hour_util >= threshold:
-                    five_hour_penalty = penalty
+                    five_hour_multiplier = multiplier
                     break
 
-            adjusted_drain = max(drain_rate - five_hour_penalty, 0.0)
+            adjusted_drain = priority_drain * five_hour_multiplier
 
             rank = (
                 adjusted_drain,
@@ -198,12 +214,14 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
                 "tier": tier,
                 "rank": rank,
                 "drain_rate": drain_rate,
+                "priority_drain": priority_drain,
+                "fresh_bonus": fresh_bonus,
                 "adjusted_drain": adjusted_drain,
                 "utilization": utilization,
                 "headroom": headroom,
                 "hours_to_reset": hours_to_reset,
                 "five_hour_utilization": five_hour_util,
-                "five_hour_penalty": five_hour_penalty,
+                "five_hour_multiplier": five_hour_multiplier,
                 "expected_burst": expected_burst,
                 "burst_blocked": burst_blocked,
                 "active_sessions": active_sessions,
@@ -232,7 +250,7 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
         if cache_source != "live":
             if cache_age is not None and cache_age > STALE_CACHE_SECONDS:
                 needs_refresh = True
-            if candidate["drain_rate"] >= HIGH_DRAIN_REFRESH_THRESHOLD and (cache_age is None or cache_age > 10):
+            if candidate["priority_drain"] >= HIGH_DRAIN_REFRESH_THRESHOLD and (cache_age is None or cache_age > 10):
                 needs_refresh = True
 
         if needs_refresh:
@@ -283,8 +301,10 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
         "headroom": selected["headroom"],
         "hours_to_reset": selected["hours_to_reset"],
         "drain_rate": selected["drain_rate"],
+        "priority_drain": selected["priority_drain"],
+        "fresh_bonus": selected["fresh_bonus"],
         "adjusted_drain": selected["adjusted_drain"],
-        "five_hour_penalty": selected["five_hour_penalty"],
+        "five_hour_multiplier": selected["five_hour_multiplier"],
         "five_hour_utilization": selected["five_hour_utilization"],
         "expected_burst": selected["expected_burst"],
         "burst_blocked": selected["burst_blocked"],
@@ -295,4 +315,3 @@ def select_account_with_load_balancing(db: Database, session_id: Optional[str] =
         "refreshed": selected.get("refreshed", False),
         "reused": False,
     }
-

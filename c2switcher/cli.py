@@ -179,10 +179,16 @@ def optimal(switch: bool, session_id: Optional[str], token_only: bool):
         )
 
         if "drain_rate" in result:
-            info_text += f"\n[dim]Drain Rate: {result['drain_rate']:.3f} %/h[/dim]"
-        if "adjusted_drain" in result and "five_hour_penalty" in result:
+            info_text += f"\n[dim]Baseline Drain: {result['drain_rate']:.3f} %/h[/dim]"
+        if "priority_drain" in result and "fresh_bonus" in result:
             info_text += (
-                f"\n[dim]Adjusted Drain: {result['adjusted_drain']:.3f} %/h (pen {result['five_hour_penalty']:.2f})[/dim]"
+                f"\n[dim]Priority Drain: {result['priority_drain']:.3f} %/h "
+                f"(fresh bonus {result['fresh_bonus']:.2f})[/dim]"
+            )
+        if "adjusted_drain" in result and "five_hour_multiplier" in result:
+            info_text += (
+                f"\n[dim]Adjusted Drain: {result['adjusted_drain']:.3f} %/h "
+                f"(5h mult {result['five_hour_multiplier']:.2f})[/dim]"
             )
         if "headroom" in result:
             info_text += f"\n[dim]Headroom: {result['headroom']:.1f}%[/dim]"
