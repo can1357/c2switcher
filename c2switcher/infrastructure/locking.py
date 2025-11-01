@@ -12,7 +12,7 @@ from typing import Optional
 
 from filelock import FileLock as FileLocker, Timeout as FileLockTimeout
 
-from .constants import LOCK_PATH, console
+from ..constants import LOCK_PATH, console
 
 _lock_acquired: Optional["FileLock"] = None
 

@@ -6,7 +6,7 @@ from typing import Dict
 
 import requests
 
-from .config import load_headers_config
+from ..config import load_headers_config
 
 
 class ClaudeAPI:

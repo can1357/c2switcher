@@ -2,10 +2,7 @@
 
 from pathlib import Path
 
-from rich.console import Console
-
-# Single shared console instance for consistent styling
-console = Console(stderr=True)
+from .presentation.console import console
 
 # Paths
 C2SWITCHER_DIR = Path.home() / ".c2switcher"
