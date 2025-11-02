@@ -92,17 +92,17 @@ Rectangle {
             Layout.alignment: Qt.AlignVCenter
 
             UsageIndicator {
-                label: "5h"
+                label: getTimeRemaining("five_hour") || "5h"
                 value: getUsageValue("five_hour")
             }
 
             UsageIndicator {
-                label: "7d"
+                label: getTimeRemaining("seven_day") || "7d"
                 value: getUsageValue("seven_day")
             }
 
             UsageIndicator {
-                label: "Opus"
+                label: (getTimeRemaining("seven_day_opus") ? getTimeRemaining("seven_day_opus") + " (O)" : "Opus")
                 value: getUsageValue("seven_day_opus")
                 highlight: true
             }
@@ -119,6 +119,28 @@ Rectangle {
         if (!accountData.usage) return null
         if (!accountData.usage[key]) return null
         return accountData.usage[key].utilization
+    }
+
+    function getTimeRemaining(key) {
+        if (!accountData.usage) return ""
+        const window = accountData.usage[key]
+        if (!window || !window.resets_at) return ""
+
+        const now = new Date()
+        const resetDate = new Date(window.resets_at)
+        const timeRemaining = resetDate - now
+
+        if (timeRemaining <= 0) return "soon"
+
+        const totalHours = timeRemaining / (60 * 60 * 1000)
+
+        if (totalHours >= 24) {
+            const days = Math.round(totalHours / 24)
+            return `${days}d`
+        } else {
+            const hours = Math.round(totalHours)
+            return `${hours}h`
+        }
     }
 
     function calculateOveruseRate() {
