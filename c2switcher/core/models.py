@@ -222,8 +222,9 @@ class Candidate:
    expected_utilization: float
    pace_gap: float
    pace_adjustment: float
-   fresh_bonus: float
-   priority_drain: float
+   usage_bonus: float
+   high_util_penalty: float
+   priority_score: float
    five_hour_utilization: float
    five_hour_factor: float
    adjusted_drain: float
@@ -270,8 +271,9 @@ class SelectionDecision:
    expected_utilization: float
    pace_gap: float
    pace_adjustment: float
-   priority_drain: float
-   fresh_bonus: float
+   priority_score: float
+   usage_bonus: float
+   high_util_penalty: float
    adjusted_drain: float
    five_hour_factor: float
    five_hour_utilization: float
@@ -300,8 +302,9 @@ class SelectionDecision:
          expected_utilization=candidate.expected_utilization,
          pace_gap=candidate.pace_gap,
          pace_adjustment=candidate.pace_adjustment,
-         priority_drain=candidate.priority_drain,
-         fresh_bonus=candidate.fresh_bonus,
+         priority_score=candidate.priority_score,
+         usage_bonus=candidate.usage_bonus,
+         high_util_penalty=candidate.high_util_penalty,
          adjusted_drain=candidate.adjusted_drain,
          five_hour_factor=candidate.five_hour_factor,
          five_hour_utilization=candidate.five_hour_utilization,

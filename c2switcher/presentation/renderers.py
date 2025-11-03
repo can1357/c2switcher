@@ -291,10 +291,10 @@ def render_selection_panel(decision: SelectionDecision, verbose: bool = False) -
       info_text += f"\nDrain: {decision.drain_rate:.2f}%/h | Headroom: {decision.headroom:.0f}% | Reset: {decision.hours_to_reset:.0f}h"
 
    if verbose:
-      if decision.priority_drain is not None and decision.fresh_bonus is not None:
+      if decision.priority_score is not None and decision.usage_bonus is not None:
          info_text += (
-            f"\n[dim]Priority Drain: {decision.priority_drain:.3f} %/h "
-            f"(fresh bonus {decision.fresh_bonus:.2f})[/dim]"
+            f"\n[dim]Priority Score: {decision.priority_score:.3f} %/h "
+            f"(usage bonus {decision.usage_bonus:.2f}, opus penalty {decision.high_util_penalty:.2f})[/dim]"
          )
       if decision.adjusted_drain is not None:
          five_hour_penalty = decision.five_hour_factor - 1.0 if decision.five_hour_factor else 0.0

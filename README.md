@@ -424,21 +424,27 @@ The optimal account selection uses a sophisticated drain-rate scoring system:
    - Measures %/hour capacity before limit
    - Higher = more urgent to use (about to reset soon)
 
-2. **Fresh account boost**: Accounts <25% usage get bonus up to +3.0 %/hour
-   - Encourages using fresh accounts before they expire unused
-   - Linear scaling: 0% usage = +3.0, 25% usage = +0.0
+2. **Opus pace gate**: Pace adjustment only when opus ≥90%
+   - Keeps hot opus accounts draining faster near reset
+   - Prevents lukewarm opus accounts from crowding out cooler ones
 
-3. **Priority drain**: `baseline_drain + fresh_bonus`
+3. **Low-util bonus**: Overall usage <60% earns up to +5.0 %/hour (clamped at 20%)
+   - Only active while opus <85%
+   - Rewards underused accounts without over-weighting near-zero usage
 
-4. **Five-hour throttling**: Multiplicative penalty for high short-term usage
+4. **Opus penalty**: Opus ≥95% subtracts 2.0 %/hour to steer load elsewhere
+
+5. **Priority score**: `baseline_drain + pace_adj + low_bonus − opus_penalty`
+
+6. **Five-hour throttling**: Multiplicative penalty for high short-term usage
    - 90%+ in last 5h: ×0.5 (half priority)
    - 85-90%: ×0.7
    - 80-85%: ×0.85
    - Prevents overuse concentration
 
-5. **Adjusted drain**: `priority_drain × five_hour_factor`
+7. **Adjusted drain**: `priority_score × five_hour_factor`
 
-6. **Final ranking** (in order):
+8. **Final ranking** (in order):
    - Adjusted drain (primary metric)
    - Utilization (lower is better)
    - Hours to reset (closer = better)
@@ -446,12 +452,12 @@ The optimal account selection uses a sophisticated drain-rate scoring system:
    - Active sessions (fewer = better)
    - Recent sessions (fewer = better)
 
-7. **Filtering**:
+9. **Filtering**:
    - Burst protection: Skip if `usage + expected_burst ≥ 94%`
    - Cool-down: Prefer accounts with 5-hour usage <90%
-   - Tier priority: Opus capacity always beats overall
+   - Window priority: overall window is used while it has headroom, opus only once overall is exhausted
 
-8. **Round-robin**: Accounts with similar drain (±0.05 %/hour) rotate fairly
+10. **Round-robin**: Accounts with similar drain (±0.05 %/hour) rotate fairly
 
 This maximizes total usage across all accounts while preventing limit violations.
 

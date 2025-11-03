@@ -4,19 +4,21 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
+from ..constants import (
+   BURST_THRESHOLD,
+   FIVE_HOUR_PENALTIES,
+   FIVE_HOUR_ROTATION_CAP,
+   LOW_USAGE_BONUS_CAP,
+   LOW_USAGE_BONUS_FLOOR,
+   LOW_USAGE_BONUS_GAIN,
+   OPUS_BONUS_THRESHOLD,
+   OPUS_HIGH_UTIL_PENALTY,
+   OPUS_PACE_GATE,
+   OPUS_PENALTY_THRESHOLD,
+   SIMILAR_DRAIN_THRESHOLD,
+)
 from .models import Account, Candidate, UsageSnapshot
 
-# Load balancer tuning parameters (imported from constants in real usage)
-SIMILAR_DRAIN_THRESHOLD = 0.05
-FIVE_HOUR_PENALTIES = [
-   (90.0, 0.5),
-   (85.0, 0.7),
-   (80.0, 0.85),
-]
-FIVE_HOUR_ROTATION_CAP = 90.0
-BURST_THRESHOLD = 94.0
-FRESH_UTILIZATION_THRESHOLD = 25.0
-FRESH_ACCOUNT_MAX_BONUS = 3.0
 WINDOW_LENGTH_HOURS = 168.0
 PACE_GAIN = 1.0
 PACE_AHEAD_DAMPING = 0.5
@@ -47,43 +49,47 @@ def build_candidate(
    if opus_util >= 99.0 and overall_util >= 99.0:
       return None
 
-   # Select window: prefer opus tier if available
-   if opus_util < 99.0:
-      window = "opus"
-      tier = 1
-      utilization = opus_util
-      hours_to_reset = usage.seven_day_opus.hours_until_reset()
-   else:
+   # Prefer overall window while it has headroom, fall back to opus otherwise
+   if overall_util < 99.0:
       window = "overall"
       tier = 2
       utilization = overall_util
       hours_to_reset = usage.seven_day.hours_until_reset()
+   else:
+      window = "opus"
+      tier = 1
+      utilization = opus_util
+      hours_to_reset = usage.seven_day_opus.hours_until_reset()
 
    # Core metrics
    headroom = max(99.0 - utilization, 0.0)
    effective_hours_left = max(hours_to_reset, 0.001)
    drain_rate = headroom / effective_hours_left if headroom > 0 else 0.0
 
-   # Pace alignment: how far ahead/behind of schedule this account is
+   # Pace alignment only when opus is hot
    window_hours = WINDOW_LENGTH_HOURS
    elapsed_hours = max(window_hours - min(hours_to_reset, window_hours), 0.0)
    expected_utilization = (elapsed_hours / window_hours) * 100.0
    expected_utilization = max(0.0, min(expected_utilization, 100.0))
    pace_gap = expected_utilization - utilization
    pace_adjustment = 0.0
-   if headroom > 0:
+   if headroom > 0 and opus_util >= OPUS_PACE_GATE and opus_util < 99.0:
       pace_adjustment = (pace_gap / effective_hours_left) * PACE_GAIN
       if pace_gap < 0:
          pace_adjustment *= PACE_AHEAD_DAMPING
       pace_adjustment = max(min(pace_adjustment, MAX_PACE_ADJUSTMENT), -MAX_PACE_ADJUSTMENT)
 
-   # Fresh account bonus
-   fresh_bonus = 0.0
-   if headroom > 0 and utilization < FRESH_UTILIZATION_THRESHOLD and pace_gap > 0:
-      freshness = (FRESH_UTILIZATION_THRESHOLD - utilization) / FRESH_UTILIZATION_THRESHOLD
-      fresh_bonus = freshness * FRESH_ACCOUNT_MAX_BONUS
+   # Low usage bonus when opus is cool
+   usage_bonus = 0.0
+   if headroom > 0 and opus_util < OPUS_BONUS_THRESHOLD and utilization < LOW_USAGE_BONUS_CAP:
+      clamped_util = max(utilization, LOW_USAGE_BONUS_FLOOR)
+      normalized_gap = (LOW_USAGE_BONUS_CAP - clamped_util) / LOW_USAGE_BONUS_CAP
+      usage_bonus = max(normalized_gap, 0.0) * LOW_USAGE_BONUS_GAIN
 
-   priority_drain = drain_rate + pace_adjustment + fresh_bonus
+   # High opus penalty once we are near the ceiling
+   high_util_penalty = OPUS_HIGH_UTIL_PENALTY if opus_util >= OPUS_PENALTY_THRESHOLD else 0.0
+
+   priority_score = drain_rate + pace_adjustment + usage_bonus - high_util_penalty
 
    # 5-hour penalty
    five_hour_util_raw = usage.five_hour.utilization
@@ -95,7 +101,7 @@ def build_candidate(
          five_hour_factor = factor
          break
 
-   adjusted_drain = priority_drain * five_hour_factor
+   adjusted_drain = priority_score * five_hour_factor
 
    # Burst blocking
    expected_burst = burst_buffer
@@ -113,8 +119,9 @@ def build_candidate(
       expected_utilization=expected_utilization,
       pace_gap=pace_gap,
       pace_adjustment=pace_adjustment,
-      fresh_bonus=fresh_bonus,
-      priority_drain=priority_drain,
+      usage_bonus=usage_bonus,
+      high_util_penalty=high_util_penalty,
+      priority_score=priority_score,
       five_hour_utilization=five_hour_util,
       five_hour_factor=five_hour_factor,
       adjusted_drain=adjusted_drain,
@@ -191,7 +198,7 @@ def needs_refresh(candidate: Candidate, stale_seconds: float = 60.0, high_drain_
    if cache_age > stale_seconds:
       return True
 
-   if candidate.priority_drain >= high_drain_threshold and cache_age > 10:
+   if candidate.priority_score >= high_drain_threshold and cache_age > 10:
       return True
 
    return False
