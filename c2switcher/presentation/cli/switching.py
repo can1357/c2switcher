@@ -19,10 +19,11 @@ from ...utils import mask_email
 @click.option("--dry-run", is_flag=True, help="Show optimal account without switching")
 @click.option("--session-id", help="Session ID for load balancing and sticky assignment")
 @click.option("--token-only", is_flag=True, help="Output only the token to stdout")
+@click.option("--with-label", is_flag=True, help="Output label before token (requires --token-only)")
 @click.option("--quiet", is_flag=True, help="Suppress panel output (use with --token-only)")
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
 @click.option("--verbose", "-v", is_flag=True, help="Show detailed metrics (drain rates, headroom, etc.)")
-def optimal(dry_run: bool, session_id: Optional[str], token_only: bool, quiet: bool, output_json: bool, verbose: bool):
+def optimal(dry_run: bool, session_id: Optional[str], token_only: bool, with_label: bool, quiet: bool, output_json: bool, verbose: bool):
    """Find and switch to the optimal account with load balancing and session stickiness."""
    acquire_lock()
    factory = ServiceFactory()
@@ -128,6 +129,8 @@ def optimal(dry_run: bool, session_id: Optional[str], token_only: bool, quiet: b
       if token_only:
          if not quiet:
             console.print(Panel(info_text, border_style="green"))
+         if with_label:
+            print(decision.account.display_identifier())
          print(token)
       else:
          console.print(Panel(info_text, border_style="green"))
@@ -150,8 +153,9 @@ def optimal(dry_run: bool, session_id: Optional[str], token_only: bool, quiet: b
 @click.argument("identifier", required=False)
 @click.option("--session-id", help="Session ID for load balancing (when no identifier given)")
 @click.option("--token-only", is_flag=True, help="Output only the token to stdout")
+@click.option("--with-label", is_flag=True, help="Output label before token (requires --token-only)")
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
-def switch(identifier: Optional[str], session_id: Optional[str], token_only: bool, output_json: bool):
+def switch(identifier: Optional[str], session_id: Optional[str], token_only: bool, with_label: bool, output_json: bool):
    """Switch to a specific account by index, nickname, email, or UUID."""
    if not identifier and not session_id:
       console.print("[red]Error: Must provide either an identifier or --session-id for load balancing[/red]")
@@ -208,6 +212,8 @@ def switch(identifier: Optional[str], session_id: Optional[str], token_only: boo
 
          if token_only:
             console.print(Panel(panel_content, border_style="green"))
+            if with_label:
+               print(account.display_identifier())
             print(token)
          else:
             console.print(Panel(panel_content, border_style="green"))

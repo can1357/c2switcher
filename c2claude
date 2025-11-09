@@ -11,6 +11,10 @@
 #   -c, --cycle      Cycle to the next account
 #   (no option)      Use current account with load balancing, or optimal if none set
 #
+# Environment Variables Set:
+#   CLAUDE_CODE_OAUTH_TOKEN  - OAuth token for the selected account
+#   C2_ACCOUNT_LABEL         - Account label (nickname, display name, or email)
+#
 # Examples:
 #   c2claude -1            # Switch to account 0 and run claude
 #   c2claude -2 -p hi      # Switch to account 1 and run claude -p hi
@@ -97,23 +101,30 @@ c2switcher start-session \
     --cwd "$(pwd)" \
     2>/dev/null || true
 
-# Get OAuth token via environment variable (no file writes!)
+# Get OAuth token and account label via environment variable (no file writes!)
 if [[ "$use_optimal" == true ]]; then
-    # Use optimal account with load balancing - get token only
-    # Info goes to stderr (visible), token goes to stdout (captured)
-    CLAUDE_CODE_OAUTH_TOKEN=$(c2switcher optimal --session-id "$SESSION_ID" --token-only)
+    # Use optimal account with load balancing - get label and token
+    # Info goes to stderr (visible), label+token go to stdout (captured)
+    output=$(c2switcher optimal --session-id "$SESSION_ID" --token-only --with-label)
+    C2_ACCOUNT_LABEL=$(echo "$output" | head -n 1)
+    CLAUDE_CODE_OAUTH_TOKEN=$(echo "$output" | tail -n 1)
 elif [[ -n "$selected_account" ]]; then
-    # Switch to specific account - get token only (no session tracking)
-    # Info goes to stderr (visible), token goes to stdout (captured)
-    CLAUDE_CODE_OAUTH_TOKEN=$(c2switcher switch "$selected_account" --token-only)
+    # Switch to specific account - get label and token (no session tracking)
+    # Info goes to stderr (visible), label+token go to stdout (captured)
+    output=$(c2switcher switch "$selected_account" --token-only --with-label)
+    C2_ACCOUNT_LABEL=$(echo "$output" | head -n 1)
+    CLAUDE_CODE_OAUTH_TOKEN=$(echo "$output" | tail -n 1)
 elif [[ "$cycle" == true ]]; then
     # Cycle through accounts - still writes credentials file (legacy behavior)
     c2switcher cycle
 fi
 
-# Export token if we got one
+# Export token and label if we got them
 if [[ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]]; then
     export CLAUDE_CODE_OAUTH_TOKEN
+fi
+if [[ -n "$C2_ACCOUNT_LABEL" ]]; then
+    export C2_ACCOUNT_LABEL
 fi
 
 # Run claude with remaining arguments (don't use exec - we need to cleanup after)

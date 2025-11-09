@@ -75,6 +75,16 @@ if [[ "$UNINSTALL" == true ]]; then
         echo -e "${YELLOW}c2switcher package not found via pip${NC}"
     fi
 
+    # Remove c2claude wrapper
+    if [[ -f "$HOME/.local/bin/c2claude" ]]; then
+        rm "$HOME/.local/bin/c2claude"
+        echo -e "${GREEN}✓ c2claude removed from ~/.local/bin${NC}"
+    fi
+    if [[ -f "/usr/local/bin/c2claude" ]]; then
+        sudo rm /usr/local/bin/c2claude
+        echo -e "${GREEN}✓ c2claude removed from /usr/local/bin${NC}"
+    fi
+
     # Remove plasmoid
     if kpackagetool6 --type=Plasma/Applet --show="$PLASMOID_ID" &> /dev/null; then
         echo -e "${BLUE}Removing plasmoid...${NC}"
@@ -143,6 +153,20 @@ if [[ "$INSTALL_CLI" == true ]]; then
 
     echo
 
+    # Install c2claude wrapper
+    echo -e "${BLUE}Installing c2claude wrapper...${NC}"
+    if [[ -d "$HOME/.local/bin" ]]; then
+        cp "$SCRIPT_DIR/c2claude" "$HOME/.local/bin/c2claude"
+        chmod +x "$HOME/.local/bin/c2claude"
+        echo -e "${GREEN}✓ c2claude installed to ~/.local/bin/c2claude${NC}"
+    else
+        sudo cp "$SCRIPT_DIR/c2claude" /usr/local/bin/c2claude
+        sudo chmod +x /usr/local/bin/c2claude
+        echo -e "${GREEN}✓ c2claude installed to /usr/local/bin/c2claude${NC}"
+    fi
+
+    echo
+
     # Verify command visibility
     if ! command -v c2switcher &> /dev/null; then
         echo -e "${YELLOW}Warning: 'c2switcher' is not currently on your PATH${NC}"
@@ -150,6 +174,14 @@ if [[ "$INSTALL_CLI" == true ]]; then
         echo
     else
         echo -e "${GREEN}✓ c2switcher command available at $(command -v c2switcher)${NC}"
+    fi
+
+    if ! command -v c2claude &> /dev/null; then
+        echo -e "${YELLOW}Warning: 'c2claude' is not currently on your PATH${NC}"
+        echo "You may need to add ~/.local/bin to your PATH."
+        echo
+    else
+        echo -e "${GREEN}✓ c2claude command available at $(command -v c2claude)${NC}"
     fi
 fi
 
