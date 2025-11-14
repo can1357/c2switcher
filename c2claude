@@ -139,12 +139,9 @@ if [[ -n "$C2_ACCOUNT_LABEL" ]]; then
     export C2_ACCOUNT_LABEL
 fi
 
-# Run claude with remaining arguments (don't use exec - we need to cleanup after)
-claude "${remaining_args[@]}" &
-CLAUDE_PID=$!
-wait "$CLAUDE_PID"
+# Run claude with remaining arguments in foreground
+claude "${remaining_args[@]}"
 EXIT_CODE=$?
 
 # Cleanup happens via trap automatically
-
 exit $EXIT_CODE
