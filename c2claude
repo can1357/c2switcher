@@ -28,6 +28,7 @@ selected_account=""
 use_optimal=true
 cycle=false
 remaining_args=()
+CLAUDE_PID=""
 
 # Generate unique session ID
 if command -v uuidgen &> /dev/null; then
@@ -42,11 +43,22 @@ PARENT_PID=$PPID
 
 # Cleanup function to end session
 cleanup_session() {
-    c2switcher end-session --session-id "$SESSION_ID" 2>/dev/null &
+    c2switcher end-session --session-id "$SESSION_ID" 2>/dev/null || true
+
+    if [[ -n "$CLAUDE_PID" ]] && kill -0 "$CLAUDE_PID" 2>/dev/null; then
+        kill -TERM "$CLAUDE_PID" 2>/dev/null || true
+        sleep 0.5
+        if kill -0 "$CLAUDE_PID" 2>/dev/null; then
+            kill -KILL "$CLAUDE_PID" 2>/dev/null || true
+        fi
+        wait "$CLAUDE_PID" 2>/dev/null || true
+    fi
+
+    pkill -P $$ 2>/dev/null || true
 }
 
 # Register cleanup to run on exit (success or failure)
-trap cleanup_session EXIT INT TERM
+trap cleanup_session EXIT INT TERM HUP QUIT
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -128,9 +140,11 @@ if [[ -n "$C2_ACCOUNT_LABEL" ]]; then
 fi
 
 # Run claude with remaining arguments (don't use exec - we need to cleanup after)
-claude "${remaining_args[@]}"
+claude "${remaining_args[@]}" &
+CLAUDE_PID=$!
+wait "$CLAUDE_PID"
 EXIT_CODE=$?
 
-# Cleanup happens via trap automatically (backgrounded)
+# Cleanup happens via trap automatically
 
 exit $EXIT_CODE
