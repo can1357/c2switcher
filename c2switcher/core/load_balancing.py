@@ -20,6 +20,7 @@ from ..constants import (
 from .models import Account, Candidate, UsageSnapshot
 
 WINDOW_LENGTH_HOURS = 168.0
+BOOTSTRAP_RESET_HOURS = 1.0  # treat accounts with no reset clock as immediately expiring
 PACE_GAIN = 1.0
 PACE_AHEAD_DAMPING = 0.5
 MAX_PACE_ADJUSTMENT = 4.0
@@ -62,6 +63,10 @@ def build_candidate(
       hours_to_reset = usage.seven_day_opus.hours_until_reset()
 
    # Core metrics
+   no_reset_clock = not usage.seven_day.resets_at and not usage.seven_day_opus.resets_at
+   if no_reset_clock:
+      hours_to_reset = min(hours_to_reset, BOOTSTRAP_RESET_HOURS)
+
    headroom = max(99.0 - utilization, 0.0)
    effective_hours_left = max(hours_to_reset, 0.001)
    drain_rate = headroom / effective_hours_left if headroom > 0 else 0.0
