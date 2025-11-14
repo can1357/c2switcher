@@ -28,7 +28,6 @@ selected_account=""
 use_optimal=true
 cycle=false
 remaining_args=()
-CLAUDE_PID=""
 
 # Generate unique session ID
 if command -v uuidgen &> /dev/null; then
@@ -41,20 +40,20 @@ fi
 # Get parent shell PID for tracking
 PARENT_PID=$PPID
 
-# Cleanup function to end session
+# Cleanup function to end session and kill all children
 cleanup_session() {
+    # Mark session as ended
     c2switcher end-session --session-id "$SESSION_ID" 2>/dev/null || true
 
-    if [[ -n "$CLAUDE_PID" ]] && kill -0 "$CLAUDE_PID" 2>/dev/null; then
-        kill -TERM "$CLAUDE_PID" 2>/dev/null || true
-        sleep 0.5
-        if kill -0 "$CLAUDE_PID" 2>/dev/null; then
-            kill -KILL "$CLAUDE_PID" 2>/dev/null || true
-        fi
-        wait "$CLAUDE_PID" 2>/dev/null || true
-    fi
+    # Kill all child processes (claude and any spawned children)
+    # First try graceful termination
+    pkill -TERM -P $$ 2>/dev/null || true
 
-    pkill -P $$ 2>/dev/null || true
+    # Give processes time to exit gracefully
+    sleep 0.2
+
+    # Force kill any remaining processes
+    pkill -KILL -P $$ 2>/dev/null || true
 }
 
 # Register cleanup to run on exit (success or failure)
@@ -139,7 +138,7 @@ if [[ -n "$C2_ACCOUNT_LABEL" ]]; then
     export C2_ACCOUNT_LABEL
 fi
 
-# Run claude with remaining arguments in foreground
+# Run claude in foreground (backgrounding breaks stdin/TTY for Ink UI)
 claude "${remaining_args[@]}"
 EXIT_CODE=$?
 
