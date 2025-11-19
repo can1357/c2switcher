@@ -16,14 +16,27 @@ class Store:
    """
    Repository layer for account, usage, and session persistence.
 
-   Encapsulates SQLite connection management and returns typed models
-   instead of raw Row objects.
+   Uses in-memory caching for fast reads. All data is loaded on initialization
+   and caches are invalidated on writes. This is efficient for c2switcher's
+   small working set (3 accounts, ~100 recent usage records).
    """
 
    def __init__(self, db_path: Path = DB_PATH):
       self.db_path = db_path
       self.conn: Optional[sqlite3.Connection] = None
+
+      # In-memory caches (loaded after DB init)
+      self._accounts_cache: List[Account] = []
+      self._accounts_by_uuid: Dict[str, Account] = {}
+      self._usage_cache: Dict[str, UsageSnapshot] = {}  # uuid -> most recent usage
+      self._burst_cache: Dict[str, float] = {}  # uuid -> burst percentile
+      self._active_sessions_cache: List[Session] = []
+      self._active_counts_cache: Dict[str, int] = {}  # uuid -> active count
+      self._recent_counts_cache: Dict[str, int] = {}  # uuid -> recent count
+      self._round_robin_cache: Dict[str, str] = {}  # window -> last uuid
+
       self._init_connection()
+      self._load_all_caches()
 
    def _init_connection(self):
       """Initialize database connection with required PRAGMAs."""
@@ -148,36 +161,173 @@ class Store:
 
       self.conn.commit()
 
-   # Account operations
-   def list_accounts(self) -> List[Account]:
-      """Retrieve all accounts ordered by index."""
+   # Cache management
+   def _load_all_caches(self):
+      """Load all caches from database on initialization."""
+      self._load_accounts_cache()
+      self._load_usage_cache()
+      self._load_burst_cache()
+      self._load_session_caches()
+      self._load_round_robin_cache()
+
+   def _load_accounts_cache(self):
+      """Load all accounts into memory."""
       cursor = self.conn.cursor()
       cursor.execute("SELECT * FROM accounts ORDER BY index_num")
-      return [Account.from_row(row) for row in cursor.fetchall()]
+      self._accounts_cache = [Account.from_row(row) for row in cursor.fetchall()]
+      self._accounts_by_uuid = {acc.uuid: acc for acc in self._accounts_cache}
+
+   def _load_usage_cache(self, max_age_seconds: int = 300):
+      """Load most recent usage for each account."""
+      self._usage_cache.clear()
+      cutoff_time = time.time() - max_age_seconds
+
+      for account in self._accounts_cache:
+         cursor = self.conn.cursor()
+         cursor.execute(
+            """
+            SELECT raw_response, queried_at
+            FROM usage_history
+            WHERE account_uuid = ?
+            AND strftime('%s', queried_at) > ?
+            ORDER BY queried_at DESC LIMIT 1
+            """,
+            (account.uuid, str(int(cutoff_time))),
+         )
+         row = cursor.fetchone()
+         if row:
+            usage_data = json.loads(row[0])
+            queried_at = row[1]
+
+            # Compute cache age
+            from datetime import datetime, timezone
+            try:
+               cache_dt = datetime.fromisoformat(queried_at.replace("Z", "+00:00"))
+               if cache_dt.tzinfo is None:
+                  cache_dt = cache_dt.replace(tzinfo=timezone.utc)
+               cache_age = max((datetime.now(timezone.utc) - cache_dt).total_seconds(), 0)
+            except Exception:
+               cache_age = 0.0
+
+            usage_data["_cache_source"] = "cache"
+            usage_data["_cache_age_seconds"] = cache_age
+            usage_data["_queried_at"] = queried_at
+
+            self._usage_cache[account.uuid] = UsageSnapshot.from_api_response(
+               account.uuid, usage_data, source="cache"
+            )
+
+   def _load_burst_cache(self):
+      """Load burst percentiles for all accounts."""
+      self._burst_cache.clear()
+      for account in self._accounts_cache:
+         self._burst_cache[account.uuid] = self._compute_burst_percentile(account.uuid)
+
+   def _load_session_caches(self):
+      """Load active sessions and counts."""
+      cursor = self.conn.cursor()
+
+      # Load active sessions
+      cursor.execute("SELECT * FROM sessions WHERE ended_at IS NULL ORDER BY created_at DESC")
+      self._active_sessions_cache = [Session.from_row(row) for row in cursor.fetchall()]
+
+      # Load active counts
+      cursor.execute(
+         """
+         SELECT account_uuid, COUNT(*) as count
+         FROM sessions
+         WHERE ended_at IS NULL AND account_uuid IS NOT NULL
+         GROUP BY account_uuid
+         """
+      )
+      self._active_counts_cache = {row[0]: row[1] for row in cursor.fetchall()}
+
+      # Load recent counts (5 minutes)
+      cursor.execute(
+         """
+         SELECT account_uuid, COUNT(*) as count
+         FROM sessions
+         WHERE account_uuid IS NOT NULL
+           AND datetime(created_at) >= datetime('now', '-5 minutes')
+         GROUP BY account_uuid
+         """
+      )
+      self._recent_counts_cache = {row[0]: row[1] for row in cursor.fetchall()}
+
+   def _load_round_robin_cache(self):
+      """Load round-robin state."""
+      cursor = self.conn.cursor()
+      cursor.execute("SELECT window, last_account_uuid FROM round_robin_state")
+      self._round_robin_cache = {row[0]: row[1] for row in cursor.fetchall()}
+
+   def _compute_burst_percentile(self, account_uuid: str, percentile: float = 95.0, limit: int = 25) -> float:
+      """Calculate usage delta percentile for burst prediction (helper for cache loading)."""
+      cursor = self.conn.cursor()
+      cursor.execute(
+         """
+         SELECT seven_day_opus_utilization, seven_day_utilization
+         FROM usage_history
+         WHERE account_uuid = ?
+         ORDER BY queried_at DESC
+         LIMIT ?
+         """,
+         (account_uuid, limit),
+      )
+      rows = cursor.fetchall()
+      if len(rows) < 2:
+         return DEFAULT_BURST_BUFFER
+
+      deltas: List[float] = []
+      prev_opus: Optional[float] = None
+      prev_overall: Optional[float] = None
+
+      for row in rows:
+         opus_util, overall_util = row
+         if prev_opus is not None and opus_util is not None:
+            deltas.append(abs(prev_opus - opus_util))
+         if prev_overall is not None and overall_util is not None:
+            deltas.append(abs(prev_overall - overall_util))
+         prev_opus = opus_util if opus_util is not None else prev_opus
+         prev_overall = overall_util if overall_util is not None else prev_overall
+
+      deltas = [d for d in deltas if d is not None]
+      if not deltas:
+         return DEFAULT_BURST_BUFFER
+
+      deltas.sort()
+      pct = max(0.0, min(100.0, percentile))
+      pos = pct / 100.0 * (len(deltas) - 1)
+      lower = int(pos)
+      upper = min(lower + 1, len(deltas) - 1)
+      if lower == upper:
+         return float(deltas[lower])
+      frac = pos - lower
+      return float(deltas[lower] + (deltas[upper] - deltas[lower]) * frac)
+
+   # Account operations (read from cache)
+   def list_accounts(self) -> List[Account]:
+      """Retrieve all accounts ordered by index."""
+      return self._accounts_cache
 
    def get_account_by_uuid(self, uuid: str) -> Optional[Account]:
       """Retrieve account by UUID."""
-      cursor = self.conn.cursor()
-      cursor.execute("SELECT * FROM accounts WHERE uuid = ?", (uuid,))
-      row = cursor.fetchone()
-      return Account.from_row(row) if row else None
+      return self._accounts_by_uuid.get(uuid)
 
    def get_account_by_identifier(self, identifier: str) -> Optional[Account]:
       """Retrieve account by index, nickname, email, or UUID."""
-      cursor = self.conn.cursor()
-
+      # Try index first
       if identifier.isdigit():
-         cursor.execute("SELECT * FROM accounts WHERE index_num = ?", (int(identifier),))
-         row = cursor.fetchone()
-         if row:
-            return Account.from_row(row)
+         idx = int(identifier)
+         for acc in self._accounts_cache:
+            if acc.index_num == idx:
+               return acc
 
-      cursor.execute(
-         "SELECT * FROM accounts WHERE nickname = ? OR email = ? OR uuid = ?",
-         (identifier, identifier, identifier),
-      )
-      row = cursor.fetchone()
-      return Account.from_row(row) if row else None
+      # Try nickname, email, or UUID
+      for acc in self._accounts_cache:
+         if acc.nickname == identifier or acc.email == identifier or acc.uuid == identifier:
+            return acc
+
+      return None
 
    def save_account(
       self, profile: Dict, credentials: Dict, nickname: Optional[str] = None
@@ -271,6 +421,10 @@ class Store:
          )
 
          account = self.get_account_by_uuid(uuid)
+
+         # Invalidate accounts cache
+         self._load_accounts_cache()
+
          return account, True
 
    def update_credentials(self, account_uuid: str, credentials: Dict):
@@ -281,6 +435,9 @@ class Store:
             "UPDATE accounts SET credentials_json = ?, updated_at = CURRENT_TIMESTAMP WHERE uuid = ?",
             (json.dumps(credentials), account_uuid),
          )
+
+      # Invalidate accounts cache
+      self._load_accounts_cache()
 
    # Usage operations
    def save_usage(self, account_uuid: str, usage_data: Dict):
@@ -312,20 +469,51 @@ class Store:
       )
       self.conn.commit()
 
-   def get_recent_usage(self, account_uuid: str, max_age_seconds: int = 300) -> Optional[UsageSnapshot]:
-      """Retrieve cached usage within age threshold."""
+      # Invalidate usage and burst caches
+      self._load_usage_cache()
+      self._load_burst_cache()
+
+   def get_recent_usage(self, account_uuid: str, max_age_seconds: int = 300, require_data: bool = False) -> Optional[UsageSnapshot]:
+      """
+      Retrieve cached usage within age threshold.
+
+      Args:
+         account_uuid: Account to fetch usage for
+         max_age_seconds: Maximum age of cache to accept
+         require_data: If True, skip records where all usage fields are null
+      """
+      # Fast path: use in-memory cache for common case (300s, no require_data)
+      if max_age_seconds == 300 and not require_data:
+         return self._usage_cache.get(account_uuid)
+
+      # Slow path: query database directly for non-standard requests
       cursor = self.conn.cursor()
       cutoff_time = time.time() - max_age_seconds
-      cursor.execute(
-         """
-         SELECT raw_response, queried_at
-         FROM usage_history
-         WHERE account_uuid = ?
-         AND strftime('%s', queried_at) > ?
-         ORDER BY queried_at DESC LIMIT 1
-         """,
-         (account_uuid, str(int(cutoff_time))),
-      )
+
+      if require_data:
+         cursor.execute(
+            """
+            SELECT raw_response, queried_at
+            FROM usage_history
+            WHERE account_uuid = ?
+            AND strftime('%s', queried_at) > ?
+            AND (seven_day_utilization IS NOT NULL OR seven_day_opus_utilization IS NOT NULL)
+            ORDER BY queried_at DESC LIMIT 1
+            """,
+            (account_uuid, str(int(cutoff_time))),
+         )
+      else:
+         cursor.execute(
+            """
+            SELECT raw_response, queried_at
+            FROM usage_history
+            WHERE account_uuid = ?
+            AND strftime('%s', queried_at) > ?
+            ORDER BY queried_at DESC LIMIT 1
+            """,
+            (account_uuid, str(int(cutoff_time))),
+         )
+
       row = cursor.fetchone()
       if not row:
          return None
@@ -350,48 +538,9 @@ class Store:
       return UsageSnapshot.from_api_response(account_uuid, usage_data, source="cache")
 
    def get_burst_percentile(self, account_uuid: str, percentile: float = 95.0, limit: int = 25) -> float:
-      """Calculate usage delta percentile for burst prediction."""
-      cursor = self.conn.cursor()
-      cursor.execute(
-         """
-         SELECT seven_day_opus_utilization, seven_day_utilization
-         FROM usage_history
-         WHERE account_uuid = ?
-         ORDER BY queried_at DESC
-         LIMIT ?
-         """,
-         (account_uuid, limit),
-      )
-      rows = cursor.fetchall()
-      if len(rows) < 2:
-         return DEFAULT_BURST_BUFFER
-
-      deltas: List[float] = []
-      prev_opus: Optional[float] = None
-      prev_overall: Optional[float] = None
-
-      for row in rows:
-         opus_util, overall_util = row
-         if prev_opus is not None and opus_util is not None:
-            deltas.append(abs(prev_opus - opus_util))
-         if prev_overall is not None and overall_util is not None:
-            deltas.append(abs(prev_overall - overall_util))
-         prev_opus = opus_util if opus_util is not None else prev_opus
-         prev_overall = overall_util if overall_util is not None else prev_overall
-
-      deltas = [d for d in deltas if d is not None]
-      if not deltas:
-         return DEFAULT_BURST_BUFFER
-
-      deltas.sort()
-      pct = max(0.0, min(100.0, percentile))
-      pos = pct / 100.0 * (len(deltas) - 1)
-      lower = int(pos)
-      upper = min(lower + 1, len(deltas) - 1)
-      if lower == upper:
-         return float(deltas[lower])
-      frac = pos - lower
-      return float(deltas[lower] + (deltas[upper] - deltas[lower]) * frac)
+      """Calculate usage delta percentile for burst prediction (from cache)."""
+      # Return cached value (computed with default percentile=95.0, limit=25)
+      return self._burst_cache.get(account_uuid, DEFAULT_BURST_BUFFER)
 
    # Session operations
    def create_session(
@@ -418,7 +567,12 @@ class Store:
       self.conn.commit()
 
       cursor.execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,))
-      return Session.from_row(cursor.fetchone())
+      session = Session.from_row(cursor.fetchone())
+
+      # Invalidate session caches
+      self._load_session_caches()
+
+      return session
 
    def assign_session_to_account(self, session_id: str, account_uuid: str):
       """Bind session to account."""
@@ -428,6 +582,9 @@ class Store:
             "UPDATE sessions SET account_uuid = ? WHERE session_id = ?",
             (account_uuid, session_id),
          )
+
+      # Invalidate session caches
+      self._load_session_caches()
 
    def get_session_account(self, session_id: str) -> Optional[Tuple[Session, Account]]:
       """Retrieve active session with its assigned account."""
@@ -468,35 +625,23 @@ class Store:
       return session, account
 
    def list_active_sessions(self) -> List[Session]:
-      """Retrieve all active sessions."""
-      cursor = self.conn.cursor()
-      cursor.execute("SELECT * FROM sessions WHERE ended_at IS NULL ORDER BY created_at DESC")
-      return [Session.from_row(row) for row in cursor.fetchall()]
+      """Retrieve all active sessions (from cache)."""
+      return self._active_sessions_cache
 
    def count_active_sessions(self, account_uuid: str) -> int:
-      """Count active sessions for account."""
-      cursor = self.conn.cursor()
-      cursor.execute(
-         "SELECT COUNT(*) FROM sessions WHERE account_uuid = ? AND ended_at IS NULL",
-         (account_uuid,),
-      )
-      return cursor.fetchone()[0]
+      """Count active sessions for account (from cache)."""
+      return self._active_counts_cache.get(account_uuid, 0)
 
    def get_active_session_counts(self) -> Dict[str, int]:
-      """Fetch active session counts for all accounts."""
-      cursor = self.conn.cursor()
-      cursor.execute(
-         """
-         SELECT account_uuid, COUNT(*) as count
-         FROM sessions
-         WHERE ended_at IS NULL AND account_uuid IS NOT NULL
-         GROUP BY account_uuid
-         """
-      )
-      return {row[0]: row[1] for row in cursor.fetchall()}
+      """Fetch active session counts for all accounts (from cache)."""
+      return self._active_counts_cache
 
    def count_recent_sessions(self, account_uuid: str, minutes: int = 5) -> int:
-      """Count sessions created within N minutes."""
+      """Count sessions created within N minutes (from cache for 5min, else query)."""
+      if minutes == 5:
+         return self._recent_counts_cache.get(account_uuid, 0)
+
+      # Fall back to DB query for non-standard time windows
       cursor = self.conn.cursor()
       cursor.execute(
          """
@@ -509,7 +654,11 @@ class Store:
       return cursor.fetchone()[0]
 
    def get_recent_session_counts(self, minutes: int = 5) -> Dict[str, int]:
-      """Get recent session counts for all accounts."""
+      """Get recent session counts for all accounts (from cache for 5min, else query)."""
+      if minutes == 5:
+         return self._recent_counts_cache
+
+      # Fall back to DB query for non-standard time windows
       cursor = self.conn.cursor()
       cursor.execute(
          """
@@ -532,6 +681,9 @@ class Store:
       )
       self.conn.commit()
 
+      # Invalidate session caches
+      self._load_session_caches()
+
    def update_session_last_checked(self, session_id: str):
       """Update last liveness check timestamp."""
       cursor = self.conn.cursor()
@@ -540,14 +692,12 @@ class Store:
          (session_id,),
       )
       self.conn.commit()
+      # Note: This doesn't affect the caches we're tracking, so no invalidation needed
 
    # Round-robin state operations
    def get_round_robin_last(self, window: str) -> Optional[str]:
-      """Get last selected account UUID for given window."""
-      cursor = self.conn.cursor()
-      cursor.execute("SELECT last_account_uuid FROM round_robin_state WHERE window = ?", (window,))
-      row = cursor.fetchone()
-      return row[0] if row else None
+      """Get last selected account UUID for given window (from cache)."""
+      return self._round_robin_cache.get(window)
 
    def set_round_robin_last(self, window: str, account_uuid: str):
       """Set last selected account UUID for given window."""
@@ -563,6 +713,9 @@ class Store:
          (window, account_uuid),
       )
       self.conn.commit()
+
+      # Invalidate round-robin cache
+      self._load_round_robin_cache()
 
    def migrate_legacy_round_robin_state(self):
       """

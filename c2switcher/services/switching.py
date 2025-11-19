@@ -289,11 +289,16 @@ class SwitchingService:
    def _fetch_usage_batch(
       self, accounts: List[Account], label: str = "batch"
    ) -> Dict[str, UsageSnapshot]:
-      """Fetch usage in parallel for multiple accounts."""
+      """
+      Fetch usage in parallel for multiple accounts.
+
+      Fetches data in parallel threads, then persists sequentially to avoid SQLite threading issues.
+      """
       if not accounts:
          return {}
 
-      results: Dict[str, UsageSnapshot] = {}
+      # Fetch in parallel (API calls only, no DB access)
+      fetch_results: List[Tuple[Account, Dict, Dict]] = []
       max_workers = min(len(accounts), 10)
 
       with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -303,17 +308,27 @@ class SwitchingService:
             account = future_map[future]
             try:
                usage_data, refreshed_creds = future.result()
-               usage = self._persist_usage_result(account, usage_data, refreshed_creds)
-               results[account.uuid] = usage
+               fetch_results.append((account, usage_data, refreshed_creds))
             except Exception as exc:
                console.print(
                   f"[yellow]Warning: Could not fetch usage for {account.email} ({label}): {exc}[/yellow]"
                )
 
+      # Persist sequentially (DB writes happen serially to avoid threading issues)
+      results: Dict[str, UsageSnapshot] = {}
+      for account, usage_data, refreshed_creds in fetch_results:
+         usage = self._persist_usage_result(account, usage_data, refreshed_creds)
+         results[account.uuid] = usage
+
       return results
 
    def _refresh_usage_payload(self, account: Account) -> tuple[Dict, Dict]:
-      """Fetch usage data and refreshed credentials without touching persistence."""
+      """
+      Fetch usage data and refreshed credentials without touching persistence.
+
+      Falls back to cached data (up to 24h old) if API returns all null fields,
+      which happens intermittently due to an Anthropic API bug.
+      """
       refreshed_creds = self.credential_store.refresh_access_token(account.credentials_json)
       token = refreshed_creds.get("claudeAiOauth", {}).get("accessToken")
 
@@ -321,6 +336,44 @@ class SwitchingService:
          raise UsageFetchError("No access token")
 
       usage_data = ClaudeAPI.get_usage(token)
+
+      # Check if API returned all null (intermittent API issue)
+      has_data = any([
+         usage_data.get('five_hour'),
+         usage_data.get('seven_day'),
+         usage_data.get('seven_day_opus')
+      ])
+
+      if not has_data:
+         # Fall back to last cached usage with actual data (up to 24 hours old, skip null records)
+         cached = self.store.get_recent_usage(account.uuid, max_age_seconds=86400, require_data=True)
+         if cached:
+            # Use cached data instead of nulls
+            console.print(f"[yellow]API returned null for {account.email}, using cached data ({cached.cache_age_seconds:.0f}s old)[/yellow]")
+
+            # Reconstruct usage_data from cached snapshot
+            usage_data = {
+               "five_hour": {
+                  "utilization": cached.five_hour.utilization,
+                  "resets_at": cached.five_hour.resets_at,
+               } if cached.five_hour.utilization is not None else None,
+               "seven_day": {
+                  "utilization": cached.seven_day.utilization,
+                  "resets_at": cached.seven_day.resets_at,
+               } if cached.seven_day.utilization is not None else None,
+               "seven_day_opus": {
+                  "utilization": cached.seven_day_opus.utilization,
+                  "resets_at": cached.seven_day_opus.resets_at,
+               } if cached.seven_day_opus.utilization is not None else None,
+               "seven_day_oauth_apps": None,
+               "iguana_necktie": None,
+               "extra_usage": usage_data.get("extra_usage"),
+               "_cache_source": "fallback",
+               "_cache_age_seconds": cached.cache_age_seconds,
+               "_queried_at": cached.queried_at,
+            }
+            return usage_data, refreshed_creds
+
       usage_data["_cache_source"] = "live"
       usage_data["_cache_age_seconds"] = 0.0
       usage_data["_queried_at"] = datetime.now(timezone.utc).isoformat()
@@ -330,16 +383,34 @@ class SwitchingService:
    def _persist_usage_result(
       self, account: Account, usage_data: Dict, refreshed_creds: Dict
    ) -> UsageSnapshot:
-      """Persist usage + credentials updates and return snapshot."""
+      """
+      Persist usage + credentials updates and return snapshot.
+
+      Skips saving usage if all fields are null to avoid overwriting good cached data.
+      """
       usage_to_store = {k: v for k, v in usage_data.items() if not k.startswith("_")}
-      self.store.save_usage(account.uuid, usage_to_store)
+
+      # Only save if we have actual data (avoid overwriting cache with nulls)
+      has_data = any([
+         usage_to_store.get('five_hour'),
+         usage_to_store.get('seven_day'),
+         usage_to_store.get('seven_day_opus')
+      ])
+
+      if has_data or usage_data.get("_cache_source") == "fallback":
+         # Save if we have real data OR if we're saving fallback data (already from cache)
+         self.store.save_usage(account.uuid, usage_to_store)
+      else:
+         console.print(f"[yellow]Skipping DB save for {account.email} (API returned all null)[/yellow]")
 
       current_creds = account.get_credentials()
       if refreshed_creds != current_creds:
          self.store.update_credentials(account.uuid, refreshed_creds)
          account.credentials_json = json.dumps(refreshed_creds)
 
-      return UsageSnapshot.from_api_response(account.uuid, usage_data, source="live")
+      # Determine source for snapshot
+      source = usage_data.get("_cache_source", "live")
+      return UsageSnapshot.from_api_response(account.uuid, usage_data, source=source)
 
    def _build_candidates(
       self,

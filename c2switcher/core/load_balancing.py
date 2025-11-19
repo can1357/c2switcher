@@ -43,8 +43,10 @@ def build_candidate(
    opus_util_raw = usage.seven_day_opus.utilization
    overall_util_raw = usage.seven_day.utilization
 
-   opus_util = float(opus_util_raw) if opus_util_raw is not None else 100.0
-   overall_util = float(overall_util_raw) if overall_util_raw is not None else 100.0
+   # Default to 0 (available) when API returns null instead of 100 (exhausted)
+   # Rationale: null typically means unused/untracked, not exhausted
+   opus_util = float(opus_util_raw) if opus_util_raw is not None else 0.0
+   overall_util = float(overall_util_raw) if overall_util_raw is not None else 0.0
 
    # Exhausted on both windows
    if opus_util >= 99.0 and overall_util >= 99.0:
@@ -98,7 +100,7 @@ def build_candidate(
 
    # 5-hour penalty
    five_hour_util_raw = usage.five_hour.utilization
-   five_hour_util = float(five_hour_util_raw) if five_hour_util_raw is not None else 50.0
+   five_hour_util = float(five_hour_util_raw) if five_hour_util_raw is not None else 0.0
 
    five_hour_factor = 1.0
    for threshold, factor in FIVE_HOUR_PENALTIES:
