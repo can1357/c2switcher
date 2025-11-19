@@ -9,6 +9,7 @@
 #   -a, --account N  Switch to account N (by index, nickname, or email)
 #   -o, --optimal    Use the optimal account (lowest usage)
 #   -c, --cycle      Cycle to the next account
+#   -l, --litellm    Use local LiteLLM proxy (skip c2switcher)
 #   (no option)      Use current account with load balancing, or optimal if none set
 #
 # Environment Variables Set:
@@ -27,6 +28,7 @@ set -e
 selected_account=""
 use_optimal=true
 cycle=false
+use_litellm=false
 remaining_args=()
 
 # Generate unique session ID
@@ -91,6 +93,11 @@ while [[ $# -gt 0 ]]; do
             use_optimal=false
             shift
             ;;
+        --litellm|-l)
+            use_litellm=true
+            use_optimal=false
+            shift
+            ;;
         *)
             remaining_args+=("$1")
             shift
@@ -104,38 +111,45 @@ export DISABLE_COST_WARNINGS=1
 export DISABLE_TELEMETRY=1
 export CLAUDE_CODE_FORCE_FULL_LOGO=true
 
-# Register session start
-c2switcher start-session \
-    --session-id "$SESSION_ID" \
-    --pid $$ \
-    --parent-pid "$PARENT_PID" \
-    --cwd "$(pwd)" \
-    2>/dev/null || true
+# LiteLLM mode: skip c2switcher entirely
+if [[ "$use_litellm" == true ]]; then
+    export ANTHROPIC_BASE_URL="${C2_LITELLM_URL:-http://localhost:4000}"
+    export CLAUDE_CODE_OAUTH_TOKEN="${C2_LITELLM_AUTH:-sk-ant-0000000000000000000000000000000000000000000000000000000000000000}"
+    export C2_ACCOUNT_LABEL="litellm"
+else
+    # Register session start
+    c2switcher start-session \
+        --session-id "$SESSION_ID" \
+        --pid $$ \
+        --parent-pid "$PARENT_PID" \
+        --cwd "$(pwd)" \
+        2>/dev/null || true
 
-# Get OAuth token and account label via environment variable (no file writes!)
-if [[ "$use_optimal" == true ]]; then
-    # Use optimal account with load balancing - get label and token
-    # Info goes to stderr (visible), label+token go to stdout (captured)
-    output=$(c2switcher optimal --session-id "$SESSION_ID" --token-only --with-label)
-    C2_ACCOUNT_LABEL=$(echo "$output" | head -n 1)
-    CLAUDE_CODE_OAUTH_TOKEN=$(echo "$output" | tail -n 1)
-elif [[ -n "$selected_account" ]]; then
-    # Switch to specific account - get label and token (no session tracking)
-    # Info goes to stderr (visible), label+token go to stdout (captured)
-    output=$(c2switcher switch "$selected_account" --token-only --with-label)
-    C2_ACCOUNT_LABEL=$(echo "$output" | head -n 1)
-    CLAUDE_CODE_OAUTH_TOKEN=$(echo "$output" | tail -n 1)
-elif [[ "$cycle" == true ]]; then
-    # Cycle through accounts - still writes credentials file (legacy behavior)
-    c2switcher cycle
-fi
+    # Get OAuth token and account label via environment variable (no file writes!)
+    if [[ "$use_optimal" == true ]]; then
+        # Use optimal account with load balancing - get label and token
+        # Info goes to stderr (visible), label+token go to stdout (captured)
+        output=$(c2switcher optimal --session-id "$SESSION_ID" --token-only --with-label)
+        C2_ACCOUNT_LABEL=$(echo "$output" | head -n 1)
+        CLAUDE_CODE_OAUTH_TOKEN=$(echo "$output" | tail -n 1)
+    elif [[ -n "$selected_account" ]]; then
+        # Switch to specific account - get label and token (no session tracking)
+        # Info goes to stderr (visible), label+token go to stdout (captured)
+        output=$(c2switcher switch "$selected_account" --token-only --with-label)
+        C2_ACCOUNT_LABEL=$(echo "$output" | head -n 1)
+        CLAUDE_CODE_OAUTH_TOKEN=$(echo "$output" | tail -n 1)
+    elif [[ "$cycle" == true ]]; then
+        # Cycle through accounts - still writes credentials file (legacy behavior)
+        c2switcher cycle
+    fi
 
-# Export token and label if we got them
-if [[ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]]; then
-    export CLAUDE_CODE_OAUTH_TOKEN
-fi
-if [[ -n "$C2_ACCOUNT_LABEL" ]]; then
-    export C2_ACCOUNT_LABEL
+    # Export token and label if we got them
+    if [[ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]]; then
+        export CLAUDE_CODE_OAUTH_TOKEN
+    fi
+    if [[ -n "$C2_ACCOUNT_LABEL" ]]; then
+        export C2_ACCOUNT_LABEL
+    fi
 fi
 
 # Run claude in foreground (backgrounding breaks stdin/TTY for Ink UI)

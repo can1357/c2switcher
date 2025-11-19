@@ -156,13 +156,11 @@ if [[ "$INSTALL_CLI" == true ]]; then
     # Install c2claude wrapper
     echo -e "${BLUE}Installing c2claude wrapper...${NC}"
     if [[ -d "$HOME/.local/bin" ]]; then
-        cp "$SCRIPT_DIR/c2claude" "$HOME/.local/bin/c2claude"
-        chmod +x "$HOME/.local/bin/c2claude"
-        echo -e "${GREEN}✓ c2claude installed to ~/.local/bin/c2claude${NC}"
+        ln -sf "$SCRIPT_DIR/c2claude" "$HOME/.local/bin/c2claude"
+        echo -e "${GREEN}✓ c2claude symlinked to ~/.local/bin/c2claude${NC}"
     else
-        sudo cp "$SCRIPT_DIR/c2claude" /usr/local/bin/c2claude
-        sudo chmod +x /usr/local/bin/c2claude
-        echo -e "${GREEN}✓ c2claude installed to /usr/local/bin/c2claude${NC}"
+        sudo ln -sf "$SCRIPT_DIR/c2claude" /usr/local/bin/c2claude
+        echo -e "${GREEN}✓ c2claude symlinked to /usr/local/bin/c2claude${NC}"
     fi
 
     echo
