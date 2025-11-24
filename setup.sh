@@ -147,9 +147,9 @@ if [[ "$INSTALL_CLI" == true ]]; then
     echo -e "${GREEN}Installing CLI tools...${NC}"
     echo
 
-    echo -e "${BLUE}Installing c2switcher package...${NC}"
-    sudo python3 -m pip install --upgrade "$SCRIPT_DIR"
-    echo -e "${GREEN}✓ c2switcher installed${NC}"
+    echo -e "${BLUE}Installing c2switcher package (editable)...${NC}"
+    sudo python3 -m pip install -e "$SCRIPT_DIR"
+    echo -e "${GREEN}✓ c2switcher installed (editable - source changes apply immediately)${NC}"
 
     echo
 

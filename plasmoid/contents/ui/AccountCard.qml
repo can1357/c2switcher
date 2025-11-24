@@ -102,8 +102,8 @@ Rectangle {
             }
 
             UsageIndicator {
-                label: (getTimeRemaining("seven_day_opus") ? getTimeRemaining("seven_day_opus") + " (O)" : "Opus")
-                value: getUsageValue("seven_day_opus")
+                label: (getTimeRemaining("seven_day_sonnet") ? getTimeRemaining("seven_day_sonnet") + " (S)" : "Sonnet")
+                value: getUsageValue("seven_day_sonnet")
                 highlight: true
             }
 
@@ -147,30 +147,30 @@ Rectangle {
         if (!accountData.usage) return null
 
         const sevenDay = accountData.usage.seven_day
-        const sevenDayOpus = accountData.usage.seven_day_opus
+        const sevenDaySonnet = accountData.usage.seven_day_sonnet
 
         // Need at least one reset window
-        if (!sevenDay && !sevenDayOpus) return null
+        if (!sevenDay && !sevenDaySonnet) return null
 
-        const opusUtil = sevenDayOpus && sevenDayOpus.utilization !== null ? sevenDayOpus.utilization : null
+        const sonnetUtil = sevenDaySonnet && sevenDaySonnet.utilization !== null ? sevenDaySonnet.utilization : null
         const overallUtil = sevenDay && sevenDay.utilization !== null ? sevenDay.utilization : null
 
         const now = new Date()
         const sevenDaysMs = 7 * 24 * 60 * 60 * 1000
         let worstRate = 0
 
-        // Calculate Opus rate with its own reset window
-        if (opusUtil !== null && sevenDayOpus && sevenDayOpus.resets_at) {
-            const opusResetDate = new Date(sevenDayOpus.resets_at)
-            const opusTimeRemaining = opusResetDate - now
+        // Calculate Sonnet rate with its own reset window
+        if (sonnetUtil !== null && sevenDaySonnet && sevenDaySonnet.resets_at) {
+            const sonnetResetDate = new Date(sevenDaySonnet.resets_at)
+            const sonnetTimeRemaining = sonnetResetDate - now
 
-            if (opusTimeRemaining > 0) {
-                const opusElapsed = sevenDaysMs - opusTimeRemaining
-                const opusExpected = (opusElapsed / sevenDaysMs) * 100
+            if (sonnetTimeRemaining > 0) {
+                const sonnetElapsed = sevenDaysMs - sonnetTimeRemaining
+                const sonnetExpected = (sonnetElapsed / sevenDaysMs) * 100
 
-                if (opusExpected > 0) {
-                    const opusRate = (opusUtil / opusExpected) * 100
-                    worstRate = Math.max(worstRate, opusRate)
+                if (sonnetExpected > 0) {
+                    const sonnetRate = (sonnetUtil / sonnetExpected) * 100
+                    worstRate = Math.max(worstRate, sonnetRate)
                 }
             }
         }
@@ -200,7 +200,7 @@ Rectangle {
         }
 
         const sevenDay = accountData.usage.seven_day
-        const sevenDayOpus = accountData.usage.seven_day_opus
+        const sevenDaySonnet = accountData.usage.seven_day_sonnet
         const now = new Date()
 
         let lines = []
@@ -220,15 +220,15 @@ Rectangle {
             }
         }
 
-        // Opus reset
-        if (sevenDayOpus && sevenDayOpus.resets_at) {
-            const opusResetDate = new Date(sevenDayOpus.resets_at)
-            const opusTimeRemaining = opusResetDate - now
+        // Sonnet reset
+        if (sevenDaySonnet && sevenDaySonnet.resets_at) {
+            const sonnetResetDate = new Date(sevenDaySonnet.resets_at)
+            const sonnetTimeRemaining = sonnetResetDate - now
 
-            if (opusTimeRemaining > 0) {
-                lines.push(`Opus resets in ${formatTimeRemaining(opusTimeRemaining)}`)
+            if (sonnetTimeRemaining > 0) {
+                lines.push(`Sonnet resets in ${formatTimeRemaining(sonnetTimeRemaining)}`)
             } else {
-                lines.push("Opus: resetting soon...")
+                lines.push("Sonnet: resetting soon...")
             }
         }
 

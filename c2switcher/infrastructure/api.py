@@ -55,7 +55,7 @@ class ClaudeAPI:
             has_data = any([
                 data.get('five_hour'),
                 data.get('seven_day'),
-                data.get('seven_day_opus')
+                data.get('seven_day_sonnet')
             ])
 
             if has_data:

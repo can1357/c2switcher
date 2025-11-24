@@ -67,6 +67,10 @@ class ReportingService:
                   "utilization": usage.seven_day_opus.utilization,
                   "resets_at": usage.seven_day_opus.resets_at,
                },
+               "seven_day_sonnet": {
+                  "utilization": usage.seven_day_sonnet.utilization,
+                  "resets_at": usage.seven_day_sonnet.resets_at,
+               },
                "cache_age_seconds": usage.cache_age_seconds,
             }
 
@@ -123,6 +127,10 @@ class ReportingService:
                "seven_day_opus": {
                   "utilization": usage.seven_day_opus.utilization,
                   "resets_at": usage.seven_day_opus.resets_at,
+               },
+               "seven_day_sonnet": {
+                  "utilization": usage.seven_day_sonnet.utilization,
+                  "resets_at": usage.seven_day_sonnet.resets_at,
                },
             }
 

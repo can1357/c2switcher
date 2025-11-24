@@ -236,13 +236,13 @@ class SwitchingService:
       # Check if account still usable
       try:
          usage = self._fetch_usage_for_account(account)
-         opus = usage.seven_day_opus.utilization
+         sonnet = usage.seven_day_sonnet.utilization
          overall = usage.seven_day.utilization
 
-         opus_ok = opus is None or float(opus) < 99
+         sonnet_ok = sonnet is None or float(sonnet) < 99
          overall_ok = overall is None or float(overall) < 99
 
-         if opus_ok and overall_ok:
+         if sonnet_ok and overall_ok:
             # Build decision from reuse
             active_counts = self.store.get_active_session_counts()
             recent_counts = self.store.get_recent_session_counts(minutes=5)
@@ -341,7 +341,7 @@ class SwitchingService:
       has_data = any([
          usage_data.get('five_hour'),
          usage_data.get('seven_day'),
-         usage_data.get('seven_day_opus')
+         usage_data.get('seven_day_sonnet')
       ])
 
       if not has_data:
@@ -365,6 +365,10 @@ class SwitchingService:
                   "utilization": cached.seven_day_opus.utilization,
                   "resets_at": cached.seven_day_opus.resets_at,
                } if cached.seven_day_opus.utilization is not None else None,
+               "seven_day_sonnet": {
+                  "utilization": cached.seven_day_sonnet.utilization,
+                  "resets_at": cached.seven_day_sonnet.resets_at,
+               } if cached.seven_day_sonnet.utilization is not None else None,
                "seven_day_oauth_apps": None,
                "iguana_necktie": None,
                "extra_usage": usage_data.get("extra_usage"),
@@ -394,7 +398,7 @@ class SwitchingService:
       has_data = any([
          usage_to_store.get('five_hour'),
          usage_to_store.get('seven_day'),
-         usage_to_store.get('seven_day_opus')
+         usage_to_store.get('seven_day_sonnet')
       ])
 
       if has_data or usage_data.get("_cache_source") == "fallback":

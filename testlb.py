@@ -17,7 +17,7 @@ class UsageWindow:
 @dataclass
 class AccountSnapshot:
    name: str
-   opus: UsageWindow
+   sonnet: UsageWindow
    overall: UsageWindow
    five_hour: float
    timestamp: datetime
@@ -47,8 +47,8 @@ def algo_baseline(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapshot, flo
 
    for acc in accounts:
       # Choose window
-      if acc.opus.utilization < 99:
-         util, hrs = acc.opus.utilization, acc.opus.hours_until_reset
+      if acc.sonnet.utilization < 99:
+         util, hrs = acc.sonnet.utilization, acc.sonnet.hours_until_reset
       else:
          util, hrs = acc.overall.utilization, acc.overall.hours_until_reset
 
@@ -86,7 +86,7 @@ def algo_baseline(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapshot, flo
 
 
 def algo_pace_gated(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapshot, float, dict]:
-   """Skip pace unless opus >= 90%."""
+   """Skip pace unless sonnet >= 90%."""
    WINDOW_LENGTH_HOURS = 168.0
    PACE_GAIN = 1.0
    PACE_AHEAD_DAMPING = 0.5
@@ -96,8 +96,8 @@ def algo_pace_gated(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapshot, f
    best, best_score, best_debug = None, -999, {}
 
    for acc in accounts:
-      if acc.opus.utilization < 99:
-         util, hrs = acc.opus.utilization, acc.opus.hours_until_reset
+      if acc.sonnet.utilization < 99:
+         util, hrs = acc.sonnet.utilization, acc.sonnet.hours_until_reset
       else:
          util, hrs = acc.overall.utilization, acc.overall.hours_until_reset
 
@@ -108,9 +108,9 @@ def algo_pace_gated(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapshot, f
       hrs = max(hrs, 0.001)
       drain = headroom / hrs
 
-      # Pace only if opus >= 90
+      # Pace only if sonnet >= 90
       pace_adj = 0
-      if headroom > 0 and acc.opus.utilization >= PACE_GATE:
+      if headroom > 0 and acc.sonnet.utilization >= PACE_GATE:
          elapsed = max(WINDOW_LENGTH_HOURS - min(hrs, WINDOW_LENGTH_HOURS), 0)
          expected_util = (elapsed / WINDOW_LENGTH_HOURS) * 100
          pace_gap = expected_util - util
@@ -142,8 +142,8 @@ def algo_low_usage_bonus(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapsh
    best, best_score, best_debug = None, -999, {}
 
    for acc in accounts:
-      if acc.opus.utilization < 99:
-         util, hrs = acc.opus.utilization, acc.opus.hours_until_reset
+      if acc.sonnet.utilization < 99:
+         util, hrs = acc.sonnet.utilization, acc.sonnet.hours_until_reset
       else:
          util, hrs = acc.overall.utilization, acc.overall.hours_until_reset
 
@@ -154,9 +154,9 @@ def algo_low_usage_bonus(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapsh
       hrs = max(hrs, 0.001)
       drain = headroom / hrs
 
-      # Pace only if opus >= 90
+      # Pace only if sonnet >= 90
       pace_adj = 0
-      if headroom > 0 and acc.opus.utilization >= PACE_GATE:
+      if headroom > 0 and acc.sonnet.utilization >= PACE_GATE:
          elapsed = max(WINDOW_LENGTH_HOURS - min(hrs, WINDOW_LENGTH_HOURS), 0)
          expected_util = (elapsed / WINDOW_LENGTH_HOURS) * 100
          pace_gap = expected_util - util
@@ -192,8 +192,8 @@ def algo_simple_lowest(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapshot
    return best, -best_score, {'util': best_score} if best else (None, -999, {})
 
 
-def algo_opus_zones(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapshot, float, dict]:
-   """Opus-aware zones: <85 bonus, 85-95 neutral, >95 penalty, pace when >90."""
+def algo_sonnet_zones(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapshot, float, dict]:
+   """Sonnet-aware zones: <85 bonus, 85-95 neutral, >95 penalty, pace when >90."""
    WINDOW_LENGTH_HOURS = 168.0
    PACE_GAIN = 1.0
    PACE_AHEAD_DAMPING = 0.5
@@ -202,10 +202,10 @@ def algo_opus_zones(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapshot, f
    LOW_BONUS_GAIN = 5.0
    LOW_BONUS_FLOOR = 20.0
 
-   # Opus zones
-   OPUS_BONUS_ZONE = 85.0
-   OPUS_NEUTRAL_ZONE = 95.0
-   OPUS_PACE_GATE = 90.0
+   # Sonnet zones
+   SONNET_BONUS_ZONE = 85.0
+   SONNET_NEUTRAL_ZONE = 95.0
+   SONNET_PACE_GATE = 90.0
    HIGH_UTIL_PENALTY = -2.0
 
    best, best_score, best_debug = None, -999, {}
@@ -216,8 +216,8 @@ def algo_opus_zones(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapshot, f
          util, hrs = acc.overall.utilization, acc.overall.hours_until_reset
          window = "overall"
       else:
-         util, hrs = acc.opus.utilization, acc.opus.hours_until_reset
-         window = "opus"
+         util, hrs = acc.sonnet.utilization, acc.sonnet.hours_until_reset
+         window = "sonnet"
 
       if util >= 99:
          continue
@@ -226,9 +226,9 @@ def algo_opus_zones(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapshot, f
       hrs = max(hrs, 0.001)
       drain = headroom / hrs
 
-      # Pace if opus >= 90 (help drain catch up)
+      # Pace if sonnet >= 90 (help drain catch up)
       pace_adj = 0
-      if headroom > 0 and acc.opus.utilization >= OPUS_PACE_GATE:
+      if headroom > 0 and acc.sonnet.utilization >= SONNET_PACE_GATE:
          elapsed = max(WINDOW_LENGTH_HOURS - min(hrs, WINDOW_LENGTH_HOURS), 0)
          expected_util = (elapsed / WINDOW_LENGTH_HOURS) * 100
          pace_gap = expected_util - util
@@ -237,17 +237,17 @@ def algo_opus_zones(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapshot, f
             pace_adj *= PACE_AHEAD_DAMPING
          pace_adj = max(min(pace_adj, MAX_PACE_ADJUSTMENT), -MAX_PACE_ADJUSTMENT)
 
-      # Opus zone logic
+      # Sonnet zone logic
       low_bonus = 0
       high_penalty = 0
 
-      if acc.opus.utilization < OPUS_BONUS_ZONE:
+      if acc.sonnet.utilization < SONNET_BONUS_ZONE:
          # <85: low-usage bonus active
          if util < LOW_BONUS_CAP:
             clamped = max(util, LOW_BONUS_FLOOR)
             normalized = (LOW_BONUS_CAP - clamped) / LOW_BONUS_CAP
             low_bonus = normalized * LOW_BONUS_GAIN
-      elif acc.opus.utilization >= OPUS_NEUTRAL_ZONE:
+      elif acc.sonnet.utilization >= SONNET_NEUTRAL_ZONE:
          # >95: penalty to prefer cooler accounts
          high_penalty = HIGH_UTIL_PENALTY
 
@@ -257,7 +257,7 @@ def algo_opus_zones(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapshot, f
          best, best_score = acc, score
          best_debug = {
             'drain': drain, 'pace': pace_adj, 'low_bonus': low_bonus,
-            'high_penalty': high_penalty, 'util': util, 'opus': acc.opus.utilization,
+            'high_penalty': high_penalty, 'util': util, 'sonnet': acc.sonnet.utilization,
             'window': window, 'hrs': hrs
          }
 
@@ -283,8 +283,8 @@ def algo_combined(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapshot, flo
          util, hrs = acc.overall.utilization, acc.overall.hours_until_reset
          window = "overall"
       else:
-         util, hrs = acc.opus.utilization, acc.opus.hours_until_reset
-         window = "opus"
+         util, hrs = acc.sonnet.utilization, acc.sonnet.hours_until_reset
+         window = "sonnet"
 
       if util >= 99:
          continue
@@ -293,9 +293,9 @@ def algo_combined(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapshot, flo
       hrs = max(hrs, 0.001)
       drain = headroom / hrs
 
-      # Pace only if opus >= 90
+      # Pace only if sonnet >= 90
       pace_adj = 0
-      if headroom > 0 and acc.opus.utilization >= PACE_GATE:
+      if headroom > 0 and acc.sonnet.utilization >= PACE_GATE:
          elapsed = max(WINDOW_LENGTH_HOURS - min(hrs, WINDOW_LENGTH_HOURS), 0)
          expected_util = (elapsed / WINDOW_LENGTH_HOURS) * 100
          pace_gap = expected_util - util
@@ -321,7 +321,7 @@ def algo_combined(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapshot, flo
 
 
 def algo_overall_first(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapshot, float, dict]:
-   """Use overall window by default (only use opus if overall exhausted)."""
+   """Use overall window by default (only use sonnet if overall exhausted)."""
    best, best_score, best_debug = None, -999, {}
 
    for acc in accounts:
@@ -330,8 +330,8 @@ def algo_overall_first(accounts: List[AccountSnapshot]) -> Tuple[AccountSnapshot
          util, hrs = acc.overall.utilization, acc.overall.hours_until_reset
          window = "overall"
       else:
-         util, hrs = acc.opus.utilization, acc.opus.hours_until_reset
-         window = "opus"
+         util, hrs = acc.sonnet.utilization, acc.sonnet.hours_until_reset
+         window = "sonnet"
 
       if util >= 99:
          continue
@@ -388,15 +388,15 @@ def load_usage_history() -> List[AccountSnapshot]:
              h.five_hour_utilization,
              h.seven_day_utilization,
              h.seven_day_resets_at,
-             h.seven_day_opus_utilization,
-             h.seven_day_opus_resets_at
+             h.seven_day_sonnet_utilization,
+             h.seven_day_sonnet_resets_at
       FROM accounts a
       JOIN usage_history h ON a.uuid = h.account_uuid
       ORDER BY h.queried_at ASC
    """)
 
    for row in cur.fetchall():
-      name, ts_str, fh, overall_util, overall_reset, opus_util, opus_reset = row
+      name, ts_str, fh, overall_util, overall_reset, sonnet_util, sonnet_reset = row
 
       # Parse timestamp (handle both naive and aware)
       if 'T' in ts_str:
@@ -419,9 +419,9 @@ def load_usage_history() -> List[AccountSnapshot]:
          delta = (reset_naive - ts_naive).total_seconds() / 3600
          return max(delta, 0.001)
 
-      opus = UsageWindow(
-         utilization=float(opus_util or 0),
-         hours_until_reset=hrs_until(opus_reset)
+      sonnet = UsageWindow(
+         utilization=float(sonnet_util or 0),
+         hours_until_reset=hrs_until(sonnet_reset)
       )
       overall = UsageWindow(
          utilization=float(overall_util or 0),
@@ -433,7 +433,7 @@ def load_usage_history() -> List[AccountSnapshot]:
 
       snapshots.append(AccountSnapshot(
          name=name,
-         opus=opus,
+         sonnet=sonnet,
          overall=overall,
          five_hour=float(fh or 0),
          timestamp=ts_naive
@@ -558,21 +558,21 @@ def test_current_state():
    snapshots = [
       AccountSnapshot(
          name="last",
-         opus=UsageWindow(27, 54.1),
+         sonnet=UsageWindow(27, 54.1),
          overall=UsageWindow(16, 54.1),
          five_hour=0,
          timestamp=datetime.now()
       ),
       AccountSnapshot(
          name="main",
-         opus=UsageWindow(74, 7.1),
+         sonnet=UsageWindow(74, 7.1),
          overall=UsageWindow(36, 88),
          five_hour=34,
          timestamp=datetime.now()
       ),
       AccountSnapshot(
          name="s1m",
-         opus=UsageWindow(5, 135.1),
+         sonnet=UsageWindow(5, 135.1),
          overall=UsageWindow(31, 133),
          five_hour=0,
          timestamp=datetime.now()
@@ -581,8 +581,8 @@ def test_current_state():
 
    algos = [
       ("baseline", algo_baseline),
-      ("opus_zones", algo_opus_zones),
-      ("pace_gated (opus>=90)", algo_pace_gated),
+      ("sonnet_zones", algo_sonnet_zones),
+      ("pace_gated (sonnet>=90)", algo_pace_gated),
       ("low_usage_bonus", algo_low_usage_bonus),
       ("combined (overall+low+pace)", algo_combined),
       ("overall_first", algo_overall_first),
@@ -604,31 +604,31 @@ def test_current_state():
    print("\n" + "="*80)
 
 
-def test_opus_spike():
-   """Test opus spike scenario (main@95% opus, last@16% overall)."""
+def test_sonnet_spike():
+   """Test sonnet spike scenario (main@95% sonnet, last@16% overall)."""
    print("\n" + "="*80)
-   print("OPUS SPIKE TEST (main maxing opus last week)")
+   print("SONNET SPIKE TEST (main maxing sonnet last week)")
    print("="*80)
 
-   # Simulate: main had opus spike to 95%
+   # Simulate: main had sonnet spike to 95%
    snapshots = [
       AccountSnapshot(
          name="last",
-         opus=UsageWindow(27, 54.1),
+         sonnet=UsageWindow(27, 54.1),
          overall=UsageWindow(16, 54.1),
          five_hour=0,
          timestamp=datetime.now()
       ),
       AccountSnapshot(
          name="main",
-         opus=UsageWindow(95, 10),  # Spiked to 95%, resets soon
+         sonnet=UsageWindow(95, 10),  # Spiked to 95%, resets soon
          overall=UsageWindow(52, 88),
          five_hour=85,
          timestamp=datetime.now()
       ),
       AccountSnapshot(
          name="s1m",
-         opus=UsageWindow(5, 135.1),
+         sonnet=UsageWindow(5, 135.1),
          overall=UsageWindow(31, 133),
          five_hour=0,
          timestamp=datetime.now()
@@ -637,15 +637,15 @@ def test_opus_spike():
 
    algos = [
       ("baseline", algo_baseline),
-      ("opus_zones (<85 bonus, >95 penalty)", algo_opus_zones),
+      ("sonnet_zones (<85 bonus, >95 penalty)", algo_sonnet_zones),
       ("combined (overall+low+pace)", algo_combined),
       ("overall_first", algo_overall_first),
    ]
 
-   # Show all candidates for opus_zones
-   print("\nDetailed opus_zones scoring:")
+   # Show all candidates for sonnet_zones
+   print("\nDetailed sonnet_zones scoring:")
    for acc in snapshots:
-      selected, score, debug = algo_opus_zones([acc])
+      selected, score, debug = algo_sonnet_zones([acc])
       if selected:
          print(f"  {acc.name:6s}: {score:7.3f} {debug}")
 
@@ -683,7 +683,7 @@ if __name__ == "__main__":
 
    algos = [
       algo_baseline,
-      algo_opus_zones,
+      algo_sonnet_zones,
       algo_pace_gated,
       algo_low_usage_bonus,
       algo_combined,
@@ -702,5 +702,5 @@ if __name__ == "__main__":
    # Test current state
    test_current_state()
 
-   # Test opus spike scenario
-   test_opus_spike()
+   # Test sonnet spike scenario
+   test_sonnet_spike()

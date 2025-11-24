@@ -13,7 +13,7 @@ PlasmoidItem {
     // Account data
     property var accounts: []
     property int totalUsage: 0
-    property int opusUsage: 0
+    property int sonnetUsage: 0
     property int activeSessions: 0
     property string resetTime: ""
     property bool loading: true
@@ -86,7 +86,7 @@ PlasmoidItem {
 
         // Calculate total usage (average of all accounts)
         let totalSevenDay = 0
-        let totalOpus = 0
+        let totalSonnet = 0
         let count = 0
 
         for (let i = 0; i < accounts.length; i++) {
@@ -96,14 +96,14 @@ PlasmoidItem {
                     totalSevenDay += acc.usage.seven_day.utilization
                     count++
                 }
-                if (acc.usage.seven_day_opus && acc.usage.seven_day_opus.utilization !== null) {
-                    totalOpus += acc.usage.seven_day_opus.utilization
+                if (acc.usage.seven_day_sonnet && acc.usage.seven_day_sonnet.utilization !== null) {
+                    totalSonnet += acc.usage.seven_day_sonnet.utilization
                 }
             }
         }
 
         totalUsage = count > 0 ? Math.round(totalSevenDay / count) : 0
-        opusUsage = count > 0 ? Math.round(totalOpus / count) : 0
+        sonnetUsage = count > 0 ? Math.round(totalSonnet / count) : 0
     }
 
     // Switch to optimal account
@@ -122,7 +122,7 @@ PlasmoidItem {
 
     // Compact representation (panel icon)
     compactRepresentation: CompactView {
-        usage: root.opusUsage
+        usage: root.sonnetUsage
         loading: root.loading
         hasError: root.hasError
 

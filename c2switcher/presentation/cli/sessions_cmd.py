@@ -188,7 +188,7 @@ def session_history(limit: int, min_duration: int, output_json: bool):
             account_index = None
             account_nickname = None
             account_email = None
-            opus_delta_value = None
+            sonnet_delta_value = None
             overall_delta_value = None
 
             account_uuid = session["account_uuid"]
@@ -203,12 +203,12 @@ def session_history(limit: int, min_duration: int, output_json: bool):
                usage_after = store.get_usage_after(account_uuid, session["ended_at"])
 
                if usage_before and usage_after:
-                  before_opus = usage_before["data"].get("seven_day_opus", {}) or {}
-                  after_opus = usage_after["data"].get("seven_day_opus", {}) or {}
-                  before_opus_pct = before_opus.get("utilization")
-                  after_opus_pct = after_opus.get("utilization")
-                  if before_opus_pct is not None and after_opus_pct is not None:
-                     opus_delta_value = after_opus_pct - before_opus_pct
+                  before_sonnet = usage_before["data"].get("seven_day_sonnet", {}) or {}
+                  after_sonnet = usage_after["data"].get("seven_day_sonnet", {}) or {}
+                  before_sonnet_pct = before_sonnet.get("utilization")
+                  after_sonnet_pct = after_sonnet.get("utilization")
+                  if before_sonnet_pct is not None and after_sonnet_pct is not None:
+                     sonnet_delta_value = after_sonnet_pct - before_sonnet_pct
 
                   before_overall = usage_before["data"].get("seven_day", {}) or {}
                   after_overall = usage_after["data"].get("seven_day", {}) or {}
@@ -224,7 +224,7 @@ def session_history(limit: int, min_duration: int, output_json: bool):
                "account_email": account_email,
                "cwd": session["cwd"],
                "duration_seconds": session["duration_seconds"],
-               "opus_delta": opus_delta_value,
+               "sonnet_delta": sonnet_delta_value,
                "overall_delta": overall_delta_value,
                "created_at": session["created_at"],
                "ended_at": session["ended_at"],
@@ -237,7 +237,7 @@ def session_history(limit: int, min_duration: int, output_json: bool):
       table.add_column("Account", style="cyan")
       table.add_column("Project Path", style="blue")
       table.add_column("Duration", style="magenta", justify="right")
-      table.add_column("Opus Δ", style="yellow", justify="right")
+      table.add_column("Sonnet Δ", style="yellow", justify="right")
       table.add_column("Overall Δ", style="yellow", justify="right")
       table.add_column("Ended", style="dim", justify="right")
 
@@ -266,7 +266,7 @@ def session_history(limit: int, min_duration: int, output_json: bool):
             minutes = int((duration_seconds % 3600) / 60)
             duration_str = f"{hours}h {minutes}m"
 
-         opus_delta = "[dim]--[/dim]"
+         sonnet_delta = "[dim]--[/dim]"
          overall_delta = "[dim]--[/dim]"
 
          if account_uuid:
@@ -274,13 +274,13 @@ def session_history(limit: int, min_duration: int, output_json: bool):
             usage_after = store.get_usage_after(account_uuid, session["ended_at"])
 
             if usage_before and usage_after:
-               before_opus = usage_before["data"].get("seven_day_opus", {}) or {}
-               after_opus = usage_after["data"].get("seven_day_opus", {}) or {}
-               before_opus_pct = before_opus.get("utilization")
-               after_opus_pct = after_opus.get("utilization")
-               if before_opus_pct is not None and after_opus_pct is not None:
-                  delta = after_opus_pct - before_opus_pct
-                  opus_delta = (
+               before_sonnet = usage_before["data"].get("seven_day_sonnet", {}) or {}
+               after_sonnet = usage_after["data"].get("seven_day_sonnet", {}) or {}
+               before_sonnet_pct = before_sonnet.get("utilization")
+               after_sonnet_pct = after_sonnet.get("utilization")
+               if before_sonnet_pct is not None and after_sonnet_pct is not None:
+                  delta = after_sonnet_pct - before_sonnet_pct
+                  sonnet_delta = (
                      f"[red]+{delta}%[/red]" if delta > 0 else f"[green]{delta}%[/green]" if delta < 0 else "[dim]0%[/dim]"
                   )
 
@@ -312,7 +312,7 @@ def session_history(limit: int, min_duration: int, output_json: bool):
             account_display,
             cwd,
             duration_str,
-            opus_delta,
+            sonnet_delta,
             overall_delta,
             ended_str,
          )

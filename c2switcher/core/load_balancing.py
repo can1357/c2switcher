@@ -11,11 +11,11 @@ from ..constants import (
    LOW_USAGE_BONUS_CAP,
    LOW_USAGE_BONUS_FLOOR,
    LOW_USAGE_BONUS_GAIN,
-   OPUS_BONUS_THRESHOLD,
-   OPUS_HIGH_UTIL_PENALTY,
-   OPUS_PACE_GATE,
-   OPUS_PENALTY_THRESHOLD,
    SIMILAR_DRAIN_THRESHOLD,
+   SONNET_BONUS_THRESHOLD,
+   SONNET_HIGH_UTIL_PENALTY,
+   SONNET_PACE_GATE,
+   SONNET_PENALTY_THRESHOLD,
 )
 from .models import Account, Candidate, UsageSnapshot
 
@@ -40,32 +40,32 @@ def build_candidate(
 
    Returns None if account is fully exhausted (99%+ on all windows).
    """
-   opus_util_raw = usage.seven_day_opus.utilization
+   sonnet_util_raw = usage.seven_day_sonnet.utilization
    overall_util_raw = usage.seven_day.utilization
 
    # Default to 0 (available) when API returns null instead of 100 (exhausted)
    # Rationale: null typically means unused/untracked, not exhausted
-   opus_util = float(opus_util_raw) if opus_util_raw is not None else 0.0
+   sonnet_util = float(sonnet_util_raw) if sonnet_util_raw is not None else 0.0
    overall_util = float(overall_util_raw) if overall_util_raw is not None else 0.0
 
    # Exhausted on both windows
-   if opus_util >= 99.0 and overall_util >= 99.0:
+   if sonnet_util >= 99.0 and overall_util >= 99.0:
       return None
 
-   # Prefer overall window while it has headroom, fall back to opus otherwise
+   # Prefer overall window while it has headroom, fall back to sonnet otherwise
    if overall_util < 99.0:
       window = "overall"
       tier = 2
       utilization = overall_util
       hours_to_reset = usage.seven_day.hours_until_reset()
    else:
-      window = "opus"
+      window = "sonnet"
       tier = 1
-      utilization = opus_util
-      hours_to_reset = usage.seven_day_opus.hours_until_reset()
+      utilization = sonnet_util
+      hours_to_reset = usage.seven_day_sonnet.hours_until_reset()
 
    # Core metrics
-   no_reset_clock = not usage.seven_day.resets_at and not usage.seven_day_opus.resets_at
+   no_reset_clock = not usage.seven_day.resets_at and not usage.seven_day_sonnet.resets_at
    if no_reset_clock:
       hours_to_reset = min(hours_to_reset, BOOTSTRAP_RESET_HOURS)
 
@@ -73,28 +73,30 @@ def build_candidate(
    effective_hours_left = max(hours_to_reset, 0.001)
    drain_rate = headroom / effective_hours_left if headroom > 0 else 0.0
 
-   # Pace alignment only when opus is hot
+   # Pace alignment calculation (tracking only - not used in scoring)
    window_hours = WINDOW_LENGTH_HOURS
    elapsed_hours = max(window_hours - min(hours_to_reset, window_hours), 0.0)
    expected_utilization = (elapsed_hours / window_hours) * 100.0
    expected_utilization = max(0.0, min(expected_utilization, 100.0))
    pace_gap = expected_utilization - utilization
+
+   # Pace adjustment - helps hot accounts drain faster near reset
    pace_adjustment = 0.0
-   if headroom > 0 and opus_util >= OPUS_PACE_GATE and opus_util < 99.0:
+   if headroom > 0 and sonnet_util >= SONNET_PACE_GATE and sonnet_util < 99.0:
       pace_adjustment = (pace_gap / effective_hours_left) * PACE_GAIN
       if pace_gap < 0:
          pace_adjustment *= PACE_AHEAD_DAMPING
       pace_adjustment = max(min(pace_adjustment, MAX_PACE_ADJUSTMENT), -MAX_PACE_ADJUSTMENT)
 
-   # Low usage bonus when opus is cool
+   # NOTE: Sonnet-specific bonuses/penalties disabled since defaulting to Opus
    usage_bonus = 0.0
-   if headroom > 0 and opus_util < OPUS_BONUS_THRESHOLD and utilization < LOW_USAGE_BONUS_CAP:
-      clamped_util = max(utilization, LOW_USAGE_BONUS_FLOOR)
-      normalized_gap = (LOW_USAGE_BONUS_CAP - clamped_util) / LOW_USAGE_BONUS_CAP
-      usage_bonus = max(normalized_gap, 0.0) * LOW_USAGE_BONUS_GAIN
+   # if headroom > 0 and sonnet_util < SONNET_BONUS_THRESHOLD and utilization < LOW_USAGE_BONUS_CAP:
+   #    clamped_util = max(utilization, LOW_USAGE_BONUS_FLOOR)
+   #    normalized_gap = (LOW_USAGE_BONUS_CAP - clamped_util) / LOW_USAGE_BONUS_CAP
+   #    usage_bonus = max(normalized_gap, 0.0) * LOW_USAGE_BONUS_GAIN
 
-   # High opus penalty once we are near the ceiling
-   high_util_penalty = OPUS_HIGH_UTIL_PENALTY if opus_util >= OPUS_PENALTY_THRESHOLD else 0.0
+   high_util_penalty = 0.0
+   # high_util_penalty = SONNET_HIGH_UTIL_PENALTY if sonnet_util >= SONNET_PENALTY_THRESHOLD else 0.0
 
    priority_score = drain_rate + pace_adjustment + usage_bonus - high_util_penalty
 

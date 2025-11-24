@@ -15,7 +15,7 @@ _Live usage monitoring with color-coded badges and one-click account switching_
 </div>
 
 - **Multi-account management** - Store and switch between multiple Claude Code accounts
-- **Usage tracking** - Monitor 5-hour, 7-day, and Opus usage limits with color-coded indicators
+- **Usage tracking** - Monitor 5-hour, 7-day, and Sonnet usage limits with color-coded indicators
 - **Smart load balancing** - Automatically picks the optimal account based on usage and active sessions
 - **Session tracking** - See which accounts are actively being used and where
 - **KDE Plasma widget** - Monitor all accounts from your panel
@@ -140,7 +140,7 @@ Output:
 ```
                              Usage Across Accounts
 ╭───────┬──────────┬────────────────────┬─────┬─────┬─────────┬──────────╮
-│ Index │ Nickname │ Email              │  5h │  7d │ 7d Opus │ Sessions │
+│ Index │ Nickname │ Email              │  5h │  7d │ 7d Sonnet │ Sessions │
 ├───────┼──────────┼────────────────────┼─────┼─────┼─────────┼──────────┤
 │   0   │ main     │ ****@gmail.com     │  0% │ 45% │     87% │    0     │
 │   1   │ work     │ ****@gmail.com     │  5% │ 77% │    100% │    0     │
@@ -221,7 +221,7 @@ This automatically switches to the best account based on:
 1. **Drain rate urgency** - Headroom ÷ hours until reset (prioritizes accounts about to reset)
 2. **Fresh account bonus** - Boosts accounts with <25% usage (up to +3.0 %/hour)
 3. **Five-hour throttling** - Multiplicative penalty for high 5-hour usage (90%: ×0.5, 85%: ×0.7, 80%: ×0.85)
-4. **Tier priority** - Opus capacity (tier 1) preferred over overall (tier 2)
+4. **Tier priority** - Sonnet capacity (tier 1) preferred over overall (tier 2)
 5. **Burst protection** - Skips accounts where usage + expected burst ≥ 94%
 6. **Load balancing** - Round-robin for similar drain rates, considers active/recent sessions
 
@@ -320,7 +320,7 @@ The CLI entry point is `c2switcher`, and everything now lives under the `c2switc
 
 ### Features
 
-- **Compact panel view**: Shows average Opus usage with color-coded badge
+- **Compact panel view**: Shows average Sonnet usage with color-coded badge
 - **Detailed popup**: Combined usage bar + individual account cards
 - **Quick switching**: One-click optimal account selection
 - **Auto-refresh**: Polls every 60 seconds
@@ -424,17 +424,17 @@ The optimal account selection uses a sophisticated drain-rate scoring system:
    - Measures %/hour capacity before limit
    - Higher = more urgent to use (about to reset soon)
 
-2. **Opus pace gate**: Pace adjustment only when opus ≥90%
-   - Keeps hot opus accounts draining faster near reset
-   - Prevents lukewarm opus accounts from crowding out cooler ones
+2. **Sonnet pace gate**: Pace adjustment only when sonnet ≥90%
+   - Keeps hot sonnet accounts draining faster near reset
+   - Prevents lukewarm sonnet accounts from crowding out cooler ones
 
 3. **Low-util bonus**: Overall usage <60% earns up to +5.0 %/hour (clamped at 20%)
-   - Only active while opus <85%
+   - Only active while sonnet <85%
    - Rewards underused accounts without over-weighting near-zero usage
 
-4. **Opus penalty**: Opus ≥95% subtracts 2.0 %/hour to steer load elsewhere
+4. **Sonnet penalty**: Sonnet ≥95% subtracts 2.0 %/hour to steer load elsewhere
 
-5. **Priority score**: `baseline_drain + pace_adj + low_bonus − opus_penalty`
+5. **Priority score**: `baseline_drain + pace_adj + low_bonus − sonnet_penalty`
 
 6. **Five-hour throttling**: Multiplicative penalty for high short-term usage
    - 90%+ in last 5h: ×0.5 (half priority)
@@ -455,7 +455,7 @@ The optimal account selection uses a sophisticated drain-rate scoring system:
 9. **Filtering**:
    - Burst protection: Skip if `usage + expected_burst ≥ 94%`
    - Cool-down: Prefer accounts with 5-hour usage <90%
-   - Window priority: overall window is used while it has headroom, opus only once overall is exhausted
+   - Window priority: overall window is used while it has headroom, sonnet only once overall is exhausted
 
 10. **Round-robin**: Accounts with similar drain (±0.05 %/hour) rotate fairly
 
@@ -554,8 +554,8 @@ echo "Best account: $email"
 current=$(c2switcher current --json)
 echo "Active: $(echo "$current" | jq -r '.email')"
 
-# Check if any account has Opus available
-c2switcher usage --json | jq '.[] | select(.usage.seven_day_opus.utilization < 90)'
+# Check if any account has Sonnet available
+c2switcher usage --json | jq '.[] | select(.usage.seven_day_sonnet.utilization < 90)'
 
 # Get token for scripting
 token=$(c2switcher optimal --token-only --quiet)

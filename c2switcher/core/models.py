@@ -98,7 +98,7 @@ class Account:
 
 @dataclass
 class UsageWindow:
-   """Usage metrics for a specific window (5h, 7d, 7d-opus)."""
+   """Usage metrics for a specific window (5h, 7d, 7d-sonnet)."""
 
    utilization: Optional[float] = None
    resets_at: Optional[str] = None
@@ -127,6 +127,7 @@ class UsageSnapshot:
    five_hour: UsageWindow
    seven_day: UsageWindow
    seven_day_opus: UsageWindow
+   seven_day_sonnet: UsageWindow
    queried_at: str
    cache_source: str = "cache"  # "cache" or "live"
    cache_age_seconds: float = 0.0
@@ -137,6 +138,7 @@ class UsageSnapshot:
       five_hour_data = data.get("five_hour", {}) or {}
       seven_day_data = data.get("seven_day", {}) or {}
       seven_day_opus_data = data.get("seven_day_opus", {}) or {}
+      seven_day_sonnet_data = data.get("seven_day_sonnet", {}) or {}
 
       return cls(
          account_uuid=account_uuid,
@@ -151,6 +153,10 @@ class UsageSnapshot:
          seven_day_opus=UsageWindow(
             utilization=seven_day_opus_data.get("utilization"),
             resets_at=seven_day_opus_data.get("resets_at"),
+         ),
+         seven_day_sonnet=UsageWindow(
+            utilization=seven_day_sonnet_data.get("utilization"),
+            resets_at=seven_day_sonnet_data.get("resets_at"),
          ),
          queried_at=data.get("_queried_at", datetime.now(timezone.utc).isoformat()),
          cache_source=data.get("_cache_source", source),
@@ -213,8 +219,8 @@ class Candidate:
 
    account: Account
    usage: UsageSnapshot
-   tier: int  # 1=opus, 2=overall
-   window: str  # "opus" or "overall"
+   tier: int  # 1=sonnet, 2=overall
+   window: str  # "sonnet" or "overall"
    utilization: float
    headroom: float
    hours_to_reset: float
@@ -263,7 +269,7 @@ class SelectionDecision:
    account: Account
    tier: int
    window: str
-   opus_usage: Optional[float]
+   sonnet_usage: Optional[float]
    overall_usage: Optional[float]
    headroom: float
    hours_to_reset: float
@@ -294,7 +300,7 @@ class SelectionDecision:
          account=candidate.account,
          tier=candidate.tier,
          window=candidate.window,
-         opus_usage=candidate.usage.seven_day_opus.utilization,
+         sonnet_usage=candidate.usage.seven_day_sonnet.utilization,
          overall_usage=candidate.usage.seven_day.utilization,
          headroom=candidate.headroom,
          hours_to_reset=candidate.hours_to_reset,

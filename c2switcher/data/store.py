@@ -102,6 +102,8 @@ class Store:
             seven_day_resets_at TEXT,
             seven_day_opus_utilization INTEGER,
             seven_day_opus_resets_at TEXT,
+            seven_day_sonnet_utilization INTEGER,
+            seven_day_sonnet_resets_at TEXT,
             raw_response TEXT NOT NULL,
             FOREIGN KEY (account_uuid) REFERENCES accounts(uuid)
          )
@@ -158,6 +160,14 @@ class Store:
          )
          """
       )
+
+      # Migration: add seven_day_sonnet columns if they don't exist
+      cursor.execute("PRAGMA table_info(usage_history)")
+      columns = {row[1] for row in cursor.fetchall()}
+      if "seven_day_sonnet_utilization" not in columns:
+         cursor.execute("ALTER TABLE usage_history ADD COLUMN seven_day_sonnet_utilization INTEGER")
+      if "seven_day_sonnet_resets_at" not in columns:
+         cursor.execute("ALTER TABLE usage_history ADD COLUMN seven_day_sonnet_resets_at TEXT")
 
       self.conn.commit()
 
@@ -265,7 +275,7 @@ class Store:
       cursor = self.conn.cursor()
       cursor.execute(
          """
-         SELECT seven_day_opus_utilization, seven_day_utilization
+         SELECT seven_day_sonnet_utilization, seven_day_utilization
          FROM usage_history
          WHERE account_uuid = ?
          ORDER BY queried_at DESC
@@ -278,16 +288,16 @@ class Store:
          return DEFAULT_BURST_BUFFER
 
       deltas: List[float] = []
-      prev_opus: Optional[float] = None
+      prev_sonnet: Optional[float] = None
       prev_overall: Optional[float] = None
 
       for row in rows:
-         opus_util, overall_util = row
-         if prev_opus is not None and opus_util is not None:
-            deltas.append(abs(prev_opus - opus_util))
+         sonnet_util, overall_util = row
+         if prev_sonnet is not None and sonnet_util is not None:
+            deltas.append(abs(prev_sonnet - sonnet_util))
          if prev_overall is not None and overall_util is not None:
             deltas.append(abs(prev_overall - overall_util))
-         prev_opus = opus_util if opus_util is not None else prev_opus
+         prev_sonnet = sonnet_util if sonnet_util is not None else prev_sonnet
          prev_overall = overall_util if overall_util is not None else prev_overall
 
       deltas = [d for d in deltas if d is not None]
@@ -446,6 +456,7 @@ class Store:
       five_hour = usage_data.get("five_hour", {}) or {}
       seven_day = usage_data.get("seven_day", {}) or {}
       seven_day_opus = usage_data.get("seven_day_opus", {}) or {}
+      seven_day_sonnet = usage_data.get("seven_day_sonnet", {}) or {}
 
       cursor.execute(
          """
@@ -453,8 +464,9 @@ class Store:
             account_uuid, five_hour_utilization, five_hour_resets_at,
             seven_day_utilization, seven_day_resets_at,
             seven_day_opus_utilization, seven_day_opus_resets_at,
+            seven_day_sonnet_utilization, seven_day_sonnet_resets_at,
             raw_response
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          """,
          (
             account_uuid,
@@ -464,6 +476,8 @@ class Store:
             seven_day.get("resets_at"),
             seven_day_opus.get("utilization"),
             seven_day_opus.get("resets_at"),
+            seven_day_sonnet.get("utilization"),
+            seven_day_sonnet.get("resets_at"),
             json.dumps(usage_data),
          ),
       )
@@ -497,7 +511,7 @@ class Store:
             FROM usage_history
             WHERE account_uuid = ?
             AND strftime('%s', queried_at) > ?
-            AND (seven_day_utilization IS NOT NULL OR seven_day_opus_utilization IS NOT NULL)
+            AND (seven_day_utilization IS NOT NULL OR seven_day_sonnet_utilization IS NOT NULL)
             ORDER BY queried_at DESC LIMIT 1
             """,
             (account_uuid, str(int(cutoff_time))),

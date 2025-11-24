@@ -135,7 +135,7 @@ def render_usage_table(usage_data: List[Dict[str, Any]]) -> Table:
    table.add_column("Email", style="green")
    table.add_column("5h", justify="right")
    table.add_column("7d", justify="right")
-   table.add_column("7d Opus", justify="right")
+   table.add_column("7d Sonnet", justify="right")
    table.add_column("Reset (Rate)", justify="right", no_wrap=True)
    table.add_column("Sessions", style="blue", justify="center")
 
@@ -161,14 +161,14 @@ def render_usage_table(usage_data: List[Dict[str, Any]]) -> Table:
 
       five_hour = usage_info.get("five_hour", {}) or {}
       seven_day = usage_info.get("seven_day", {}) or {}
-      seven_day_opus = usage_info.get("seven_day_opus", {}) or {}
+      seven_day_sonnet = usage_info.get("seven_day_sonnet", {}) or {}
 
-      opus_util = seven_day_opus.get("utilization")
+      sonnet_util = seven_day_sonnet.get("utilization")
       overall_util = seven_day.get("utilization")
       reset_time = format_time_until_reset(
-         seven_day_opus.get("resets_at") if seven_day_opus else None,
+         seven_day_sonnet.get("resets_at") if seven_day_sonnet else None,
          seven_day.get("resets_at"),
-         opus_util if opus_util is not None else 0,
+         sonnet_util if sonnet_util is not None else 0,
          overall_util if overall_util is not None else 0,
       )
 
@@ -178,7 +178,7 @@ def render_usage_table(usage_data: List[Dict[str, Any]]) -> Table:
          acc.email if hasattr(acc, 'email') else acc.get("email"),
          format_usage_value(five_hour.get("utilization")),
          format_usage_value(seven_day.get("utilization")),
-         format_usage_value(seven_day_opus.get("utilization")),
+         format_usage_value(seven_day_sonnet.get("utilization")),
          reset_time,
          session_str,
       )
@@ -194,7 +194,7 @@ def render_session_history_table(sessions: List[Dict[str, Any]]) -> Table:
    table.add_column("Account", style="cyan")
    table.add_column("Project Path", style="blue")
    table.add_column("Duration", style="magenta", justify="right")
-   table.add_column("Opus Δ", style="yellow", justify="right")
+   table.add_column("Sonnet Δ", style="yellow", justify="right")
    table.add_column("Overall Δ", style="yellow", justify="right")
    table.add_column("Ended", style="dim", justify="right")
 
@@ -218,13 +218,13 @@ def render_session_history_table(sessions: List[Dict[str, Any]]) -> Table:
          duration_seconds = session.get("duration_seconds", 0)
          duration_str = format_duration(duration_seconds)
 
-         opus_delta = session.get("opus_delta", "[dim]--[/dim]")
+         sonnet_delta = session.get("sonnet_delta", "[dim]--[/dim]")
          overall_delta = session.get("overall_delta", "[dim]--[/dim]")
 
-         if isinstance(opus_delta, (int, float)):
-            opus_delta = (
-               f"[red]+{opus_delta}%[/red]" if opus_delta > 0
-               else f"[green]{opus_delta}%[/green]" if opus_delta < 0
+         if isinstance(sonnet_delta, (int, float)):
+            sonnet_delta = (
+               f"[red]+{sonnet_delta}%[/red]" if sonnet_delta > 0
+               else f"[green]{sonnet_delta}%[/green]" if sonnet_delta < 0
                else "[dim]0%[/dim]"
             )
 
@@ -243,7 +243,7 @@ def render_session_history_table(sessions: List[Dict[str, Any]]) -> Table:
             account_display,
             cwd,
             duration_str,
-            opus_delta,
+            sonnet_delta,
             overall_delta,
             ended_str,
          )
@@ -283,7 +283,7 @@ def render_selection_panel(decision: SelectionDecision, verbose: bool = False) -
       f"[green]Optimal Account (={account.index_num}) - {tier_label}[/green]\n\n"
       f"Nickname: [bold]{nickname}[/bold]\n"
       f"Email: [bold]{masked_email}[/bold]\n"
-      f"Opus Usage:    {int(decision.opus_usage or 0):>3}%\n"
+      f"Sonnet Usage:  {int(decision.sonnet_usage or 0):>3}%\n"
       f"Overall Usage: {int(decision.overall_usage or 0):>3}%"
    )
 
@@ -294,7 +294,7 @@ def render_selection_panel(decision: SelectionDecision, verbose: bool = False) -
       if decision.priority_score is not None and decision.usage_bonus is not None:
          info_text += (
             f"\n[dim]Priority Score: {decision.priority_score:.3f} %/h "
-            f"(usage bonus {decision.usage_bonus:.2f}, opus penalty {decision.high_util_penalty:.2f})[/dim]"
+            f"(usage bonus {decision.usage_bonus:.2f}, sonnet penalty {decision.high_util_penalty:.2f})[/dim]"
          )
       if decision.adjusted_drain is not None:
          five_hour_penalty = decision.five_hour_factor - 1.0 if decision.five_hour_factor else 0.0

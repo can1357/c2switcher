@@ -61,7 +61,7 @@ def optimal(dry_run: bool, session_id: Optional[str], token_only: bool, with_lab
             "nickname": decision.account.nickname,
             "email": decision.account.email,
             "tier": decision.tier,
-            "opus_usage": decision.opus_usage,
+            "sonnet_usage": decision.sonnet_usage,
             "overall_usage": decision.overall_usage,
             "switched": should_switch and not token_only,
             "reused_session": decision.reused,
@@ -79,7 +79,7 @@ def optimal(dry_run: bool, session_id: Optional[str], token_only: bool, with_lab
       masked_email = mask_email(decision.account.email)
 
       tier_label = f"Tier {decision.tier}" if decision.tier else "N/A"
-      opus_usage = decision.opus_usage if decision.opus_usage is not None else 0
+      sonnet_usage = decision.sonnet_usage if decision.sonnet_usage is not None else 0
       overall_usage = decision.overall_usage if decision.overall_usage is not None else 0
       session_info = ""
 
@@ -94,7 +94,7 @@ def optimal(dry_run: bool, session_id: Optional[str], token_only: bool, with_lab
          f"[green]Optimal Account (={decision.account.index_num}) - {tier_label}[/green]\n\n"
          f"Nickname: [bold]{nickname}[/bold]\n"
          f"Email: [bold]{masked_email}[/bold]\n"
-         f"Opus Usage:    {opus_usage:>3}%\n"
+         f"Sonnet Usage:  {sonnet_usage:>3}%\n"
          f"Overall Usage: {overall_usage:>3}%"
       )
 
@@ -106,7 +106,7 @@ def optimal(dry_run: bool, session_id: Optional[str], token_only: bool, with_lab
          if decision.priority_score is not None and decision.usage_bonus is not None:
             info_text += (
                f"\n[dim]Priority Score: {decision.priority_score:.3f} %/h "
-               f"(usage bonus {decision.usage_bonus:.2f}, opus penalty {decision.high_util_penalty:.2f})[/dim]"
+               f"(usage bonus {decision.usage_bonus:.2f}, sonnet penalty {decision.high_util_penalty:.2f})[/dim]"
             )
          if decision.adjusted_drain is not None and decision.five_hour_factor is not None:
             info_text += (

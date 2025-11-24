@@ -36,8 +36,8 @@ def load_usage_history(db_path: Path) -> pd.DataFrame:
             uh.five_hour_resets_at,
             uh.seven_day_utilization,
             uh.seven_day_resets_at,
-            uh.seven_day_opus_utilization,
-            uh.seven_day_opus_resets_at,
+            uh.seven_day_sonnet_utilization,
+            uh.seven_day_sonnet_resets_at,
             a.nickname,
             a.display_name,
             a.email
@@ -56,7 +56,7 @@ def load_usage_history(db_path: Path) -> pd.DataFrame:
         "queried_at",
         "five_hour_resets_at",
         "seven_day_resets_at",
-        "seven_day_opus_resets_at",
+        "seven_day_sonnet_resets_at",
     ]
     datetime_updates = {
         col: pd.to_datetime(df[col], utc=True, errors="coerce").dt.tz_localize(None)
@@ -69,7 +69,7 @@ def load_usage_history(db_path: Path) -> pd.DataFrame:
     numeric_cols = [
         "five_hour_utilization",
         "seven_day_utilization",
-        "seven_day_opus_utilization",
+        "seven_day_sonnet_utilization",
     ]
     numeric_updates = {col: pd.to_numeric(df[col], errors="coerce") for col in numeric_cols}
     df = df.assign(**numeric_updates)
@@ -102,23 +102,23 @@ class AccountForecast:
     account: str
     latest_timestamp: datetime
     current_7d: float
-    current_opus: float
+    current_sonnet: float
     current_5h: float
     rate_7d: float
-    rate_opus: float
+    rate_sonnet: float
     hours_to_cap_7d: float
-    hours_to_cap_opus: float
+    hours_to_cap_sonnet: float
     hours_until_7d_reset: Optional[float]
-    hours_until_opus_reset: Optional[float]
+    hours_until_sonnet_reset: Optional[float]
     hours_until_5h_reset: Optional[float]
     hits_7d_before_reset: bool
-    hits_opus_before_reset: bool
+    hits_sonnet_before_reset: bool
     first_limit_type: Optional[str]
     first_limit_hours: float
     status: str
     headline: str
     reset_7d_at: Optional[datetime]
-    reset_opus_at: Optional[datetime]
+    reset_sonnet_at: Optional[datetime]
 
 
 def forecast_account(acc_df: pd.DataFrame, window_hours: int) -> Optional[AccountForecast]:
@@ -134,10 +134,10 @@ def forecast_account(acc_df: pd.DataFrame, window_hours: int) -> Optional[Accoun
         recent = acc_df.tail(5)
 
     rate_7d = slope_per_hour(recent["seven_day_utilization"], recent["queried_at"])
-    rate_opus = slope_per_hour(recent["seven_day_opus_utilization"], recent["queried_at"])
+    rate_sonnet = slope_per_hour(recent["seven_day_sonnet_utilization"], recent["queried_at"])
 
     current_7d = float(latest["seven_day_utilization"] or 0)
-    current_opus = float(latest["seven_day_opus_utilization"] or 0)
+    current_sonnet = float(latest["seven_day_sonnet_utilization"] or 0)
     current_5h = float(latest["five_hour_utilization"] or 0)
 
     def hours_until(reset_time: Optional[datetime]) -> Optional[float]:
@@ -147,10 +147,10 @@ def forecast_account(acc_df: pd.DataFrame, window_hours: int) -> Optional[Accoun
         return max(0.0, delta)
 
     reset_7d_at = latest["seven_day_resets_at"]
-    reset_opus_at = latest["seven_day_opus_resets_at"]
+    reset_sonnet_at = latest["seven_day_sonnet_resets_at"]
 
     hours_until_7d_reset = hours_until(reset_7d_at)
-    hours_until_opus_reset = hours_until(reset_opus_at)
+    hours_until_sonnet_reset = hours_until(reset_sonnet_at)
     hours_until_5h_reset = hours_until(latest["five_hour_resets_at"])
 
     def hours_to_cap(current: float, rate: float) -> float:
@@ -159,20 +159,20 @@ def forecast_account(acc_df: pd.DataFrame, window_hours: int) -> Optional[Accoun
         return max(0.0, (100 - current) / rate)
 
     hours_to_cap_7d = hours_to_cap(current_7d, rate_7d)
-    hours_to_cap_opus = hours_to_cap(current_opus, rate_opus)
+    hours_to_cap_sonnet = hours_to_cap(current_sonnet, rate_sonnet)
 
     hits_7d_before_reset = hours_to_cap_7d != float("inf") and (
         hours_until_7d_reset is None or hours_to_cap_7d < hours_until_7d_reset
     )
-    hits_opus_before_reset = hours_to_cap_opus != float("inf") and (
-        hours_until_opus_reset is None or hours_to_cap_opus < hours_until_opus_reset
+    hits_sonnet_before_reset = hours_to_cap_sonnet != float("inf") and (
+        hours_until_sonnet_reset is None or hours_to_cap_sonnet < hours_until_sonnet_reset
     )
 
     limit_candidates = []
     if hits_7d_before_reset:
         limit_candidates.append(("7-day overall", hours_to_cap_7d))
-    if hits_opus_before_reset:
-        limit_candidates.append(("7-day Opus", hours_to_cap_opus))
+    if hits_sonnet_before_reset:
+        limit_candidates.append(("7-day Sonnet", hours_to_cap_sonnet))
 
     if limit_candidates:
         first_limit_type, first_limit_hours = min(limit_candidates, key=lambda item: item[1])
@@ -181,7 +181,7 @@ def forecast_account(acc_df: pd.DataFrame, window_hours: int) -> Optional[Accoun
 
     if first_limit_type is None:
         status = "🟢 Reset"
-        resets = [val for val in (hours_until_7d_reset, hours_until_opus_reset) if val is not None]
+        resets = [val for val in (hours_until_7d_reset, hours_until_sonnet_reset) if val is not None]
         if resets:
             soonest_reset = min(resets)
             headline = f"Resets in {format_horizon(soonest_reset)} before limits"
@@ -200,23 +200,23 @@ def forecast_account(acc_df: pd.DataFrame, window_hours: int) -> Optional[Accoun
         account=latest["account"],
         latest_timestamp=now,
         current_7d=current_7d,
-        current_opus=current_opus,
+        current_sonnet=current_sonnet,
         current_5h=current_5h,
         rate_7d=rate_7d,
-        rate_opus=rate_opus,
+        rate_sonnet=rate_sonnet,
         hours_to_cap_7d=hours_to_cap_7d,
-        hours_to_cap_opus=hours_to_cap_opus,
+        hours_to_cap_sonnet=hours_to_cap_sonnet,
         hours_until_7d_reset=hours_until_7d_reset,
-        hours_until_opus_reset=hours_until_opus_reset,
+        hours_until_sonnet_reset=hours_until_sonnet_reset,
         hours_until_5h_reset=hours_until_5h_reset,
         hits_7d_before_reset=hits_7d_before_reset,
-        hits_opus_before_reset=hits_opus_before_reset,
+        hits_sonnet_before_reset=hits_sonnet_before_reset,
         first_limit_type=first_limit_type,
         first_limit_hours=first_limit_hours,
         status=status,
         headline=headline,
         reset_7d_at=reset_7d_at,
-        reset_opus_at=reset_opus_at,
+        reset_sonnet_at=reset_sonnet_at,
     )
 
 
@@ -225,9 +225,9 @@ class FleetMetrics:
     total_accounts: int
     status_counts: Counter[str]
     total_rate_7d: float
-    total_rate_opus: float
+    total_rate_sonnet: float
     required_overall: int
-    required_opus: int
+    required_sonnet: int
     recommended_fleet: int
     headroom: int
     shortfall: int
@@ -282,7 +282,7 @@ def compute_fleet_metrics(forecasts: Iterable[AccountForecast]) -> FleetMetrics:
     per_account_capacity = 100 / (7 * 24)
 
     total_rate_7d = sum(max(f.rate_7d, 0.0) for f in forecasts)
-    total_rate_opus = sum(max(f.rate_opus, 0.0) for f in forecasts)
+    total_rate_sonnet = sum(max(f.rate_sonnet, 0.0) for f in forecasts)
 
     def required_accounts(total_rate: float) -> int:
         if total_rate <= 0:
@@ -290,10 +290,10 @@ def compute_fleet_metrics(forecasts: Iterable[AccountForecast]) -> FleetMetrics:
         return max(1, math.ceil(total_rate / per_account_capacity))
 
     required_overall = required_accounts(total_rate_7d)
-    required_opus = required_accounts(total_rate_opus)
-    recommended_fleet = max(required_overall, required_opus)
+    required_sonnet = required_accounts(total_rate_sonnet)
+    recommended_fleet = max(required_overall, required_sonnet)
 
-    at_risk_accounts = [f.account for f in forecasts if f.hits_7d_before_reset or f.hits_opus_before_reset]
+    at_risk_accounts = [f.account for f in forecasts if f.hits_7d_before_reset or f.hits_sonnet_before_reset]
 
     limit_candidates = [
         (f.account, f.first_limit_type, f.first_limit_hours)
@@ -305,7 +305,7 @@ def compute_fleet_metrics(forecasts: Iterable[AccountForecast]) -> FleetMetrics:
     reset_candidates = [
         value
         for f in forecasts
-        for value in (f.hours_until_7d_reset, f.hours_until_opus_reset)
+        for value in (f.hours_until_7d_reset, f.hours_until_sonnet_reset)
         if value is not None
     ]
     nearest_reset = min(reset_candidates) if reset_candidates else None
@@ -317,9 +317,9 @@ def compute_fleet_metrics(forecasts: Iterable[AccountForecast]) -> FleetMetrics:
         total_accounts=len(forecasts),
         status_counts=status_counts,
         total_rate_7d=total_rate_7d,
-        total_rate_opus=total_rate_opus,
+        total_rate_sonnet=total_rate_sonnet,
         required_overall=required_overall,
-        required_opus=required_opus,
+        required_sonnet=required_sonnet,
         recommended_fleet=recommended_fleet,
         headroom=headroom,
         shortfall=shortfall,
@@ -349,13 +349,13 @@ def fleet_snapshot_panel(metrics: FleetMetrics) -> Panel:
     lines = [" ".join(headline_parts)]
 
     lines.append(
-        f"Burn (7d/Opus): {metrics.total_rate_7d:.2f}%/h / {metrics.total_rate_opus:.2f}%/h"
+        f"Burn (7d/Sonnet): {metrics.total_rate_7d:.2f}%/h / {metrics.total_rate_sonnet:.2f}%/h"
     )
 
     if metrics.recommended_fleet:
         lines.append(f"Recommended fleet: {metrics.recommended_fleet} account(s)")
         if metrics.shortfall > 0:
-            lines.append(f"[red]Shortfall:[/] add {metrics.shortfall} account(s) (Opus/Sonnet burn exceeds supply)")
+            lines.append(f"[red]Shortfall:[/] add {metrics.shortfall} account(s) (Sonnet burn exceeds supply)")
         else:
             lines.append(f"Headroom: {metrics.headroom} account(s)")
     else:
@@ -389,13 +389,13 @@ def account_card(forecast: AccountForecast) -> Panel:
         f"{forecast.status} [bold]{forecast.account}[/]",
         f"{_usage_bar(forecast.current_7d)} {_colorize_percent(forecast.current_7d)} "
         f"7d • {_colorize_rate(forecast.rate_7d)}",
-        f"{_usage_bar(forecast.current_opus)} {_colorize_percent(forecast.current_opus)} "
-        f"Opus • {_colorize_rate(forecast.rate_opus)}",
+        f"{_usage_bar(forecast.current_sonnet)} {_colorize_percent(forecast.current_sonnet)} "
+        f"Sonnet • {_colorize_rate(forecast.rate_sonnet)}",
     ]
 
     lines.append(
         f"Resets: 7d {format_horizon(forecast.hours_until_7d_reset)} • "
-        f"Opus {format_horizon(forecast.hours_until_opus_reset)}"
+        f"Sonnet {format_horizon(forecast.hours_until_sonnet_reset)}"
     )
 
     if forecast.first_limit_type:
@@ -403,12 +403,12 @@ def account_card(forecast: AccountForecast) -> Panel:
     else:
         lines.append("Limit: Resets first")
 
-    gap = forecast.current_opus - forecast.current_7d
+    gap = forecast.current_sonnet - forecast.current_7d
     if abs(gap) >= 8:
         if gap > 0:
-            lines.append(f"Opus +{abs(gap):.0f}% vs 7d")
+            lines.append(f"Sonnet +{abs(gap):.0f}% vs 7d")
         else:
-            lines.append(f"7d +{abs(gap):.0f}% vs Opus")
+            lines.append(f"7d +{abs(gap):.0f}% vs Sonnet")
 
     if forecast.current_5h >= 60:
         lines.append(f"5h window {forecast.current_5h:.0f}% — consider resting soon.")
@@ -434,7 +434,7 @@ def limit_outlook_table(forecasts: Iterable[AccountForecast]) -> Optional[Table]
 
     for f in forecasts:
         reset_candidates = [
-            val for val in (f.hours_until_7d_reset, f.hours_until_opus_reset) if val is not None
+            val for val in (f.hours_until_7d_reset, f.hours_until_sonnet_reset) if val is not None
         ]
         reset_eta = min(reset_candidates) if reset_candidates else None
 
@@ -471,9 +471,9 @@ def limit_outlook_table(forecasts: Iterable[AccountForecast]) -> Optional[Table]
     table.add_column("ETA", justify="left")
     table.add_column("Reset", justify="right")
     table.add_column("7d", justify="right")
-    table.add_column("Opus", justify="right")
+    table.add_column("Sonnet", justify="right")
     table.add_column("7d Rate", justify="right")
-    table.add_column("Opus Rate", justify="right")
+    table.add_column("Sonnet Rate", justify="right")
 
     for item in rows:
         f = item["forecast"]
@@ -484,9 +484,9 @@ def limit_outlook_table(forecasts: Iterable[AccountForecast]) -> Optional[Table]
             item["eta_display"],
             reset_display,
             _colorize_percent(f.current_7d),
-            _colorize_percent(f.current_opus),
+            _colorize_percent(f.current_sonnet),
             _colorize_rate(f.rate_7d),
-            _colorize_rate(f.rate_opus),
+            _colorize_rate(f.rate_sonnet),
         )
 
     return table
@@ -496,7 +496,7 @@ def playbook_panel(forecasts: Iterable[AccountForecast], metrics: FleetMetrics) 
     lines = []
 
     if metrics.shortfall > 0:
-        lines.append(f"[bold red]Add {metrics.shortfall} account(s) to match current Opus/Sonnet burn.[/bold red]")
+        lines.append(f"[bold red]Add {metrics.shortfall} account(s) to match current Sonnet burn.[/bold red]")
 
     for f in forecasts:
         if f.first_limit_type:
@@ -507,9 +507,9 @@ def playbook_panel(forecasts: Iterable[AccountForecast], metrics: FleetMetrics) 
                 lines.append(f"[bold]{f.account}[/] hits {f.first_limit_type} in {horizon} — prep fallback.")
             else:
                 lines.append(f"[bold]{f.account}[/] trending toward {f.first_limit_type} in {horizon}; monitor.")
-        elif f.rate_opus > 0.5 or f.rate_7d > 0.5:
+        elif f.rate_sonnet > 0.5 or f.rate_7d > 0.5:
             lines.append(
-                f"[bold]{f.account}[/] burning quickly but resets first — check sessions (~{f.rate_opus:.2f}%/h Opus)."
+                f"[bold]{f.account}[/] burning quickly but resets first — check sessions (~{f.rate_sonnet:.2f}%/h Sonnet)."
             )
         if f.current_5h > 80:
             lines.append(f"[bold]{f.account}[/] five-hour window {f.current_5h:.0f}% — give it breathing room.")
@@ -579,7 +579,7 @@ def create_visualizations(df: pd.DataFrame, forecasts: Iterable[AccountForecast]
     ax1.legend(loc="upper left", frameon=False)
     ax1.set_ylim(0, 110)
 
-    # Panel 2: 7-day Opus utilization trend
+    # Panel 2: 7-day Sonnet utilization trend
     ax2 = fig.add_subplot(gs[0, 1])
     for account in accounts:
         acc_data = df[df["account"] == account]
@@ -588,7 +588,7 @@ def create_visualizations(df: pd.DataFrame, forecasts: Iterable[AccountForecast]
         forecast = forecast_map.get(account)
         (line,) = ax2.plot(
             acc_data["queried_at"],
-            acc_data["seven_day_opus_utilization"],
+            acc_data["seven_day_sonnet_utilization"],
             marker="o",
             linewidth=2,
             markersize=3,
@@ -596,28 +596,28 @@ def create_visualizations(df: pd.DataFrame, forecasts: Iterable[AccountForecast]
         )
         color = line.get_color()
         if forecast:
-            if forecast.reset_opus_at is not None and not pd.isna(forecast.reset_opus_at):
-                ax2.axvline(forecast.reset_opus_at, color=color, linestyle=":", alpha=0.35)
-            if forecast.rate_opus > 0:
-                horizon = forecast.hours_to_cap_opus
-                if forecast.hours_until_opus_reset is not None:
-                    horizon = min(horizon, forecast.hours_until_opus_reset)
+            if forecast.reset_sonnet_at is not None and not pd.isna(forecast.reset_sonnet_at):
+                ax2.axvline(forecast.reset_sonnet_at, color=color, linestyle=":", alpha=0.35)
+            if forecast.rate_sonnet > 0:
+                horizon = forecast.hours_to_cap_sonnet
+                if forecast.hours_until_sonnet_reset is not None:
+                    horizon = min(horizon, forecast.hours_until_sonnet_reset)
                 if horizon != float("inf") and horizon > 0:
                     end_time = forecast.latest_timestamp + timedelta(hours=horizon)
-                    end_value = forecast.current_opus + forecast.rate_opus * horizon
+                    end_value = forecast.current_sonnet + forecast.rate_sonnet * horizon
                     ax2.plot(
                         [forecast.latest_timestamp, end_time],
-                        [forecast.current_opus, min(100, end_value)],
+                        [forecast.current_sonnet, min(100, end_value)],
                         linestyle="--",
                         color=color,
                         alpha=0.85,
                     )
-            if forecast.hits_opus_before_reset and forecast.hours_to_cap_opus != float("inf"):
-                limit_time = forecast.latest_timestamp + timedelta(hours=forecast.hours_to_cap_opus)
+            if forecast.hits_sonnet_before_reset and forecast.hours_to_cap_sonnet != float("inf"):
+                limit_time = forecast.latest_timestamp + timedelta(hours=forecast.hours_to_cap_sonnet)
                 ax2.scatter(limit_time, 100, color=color, marker="x", zorder=5)
 
     ax2.axhline(100, color="#e03131", linestyle="--", linewidth=2)
-    ax2.set_title("7-Day Opus Utilization")
+    ax2.set_title("7-Day Sonnet Utilization")
     ax2.set_ylabel("Usage %")
     ax2.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
     plt.setp(ax2.get_xticklabels(), rotation=45, ha="right")
@@ -637,15 +637,15 @@ def create_visualizations(df: pd.DataFrame, forecasts: Iterable[AccountForecast]
         if forecast.reset_7d_at is not None and not pd.isna(forecast.reset_7d_at):
             ax3.scatter(forecast.reset_7d_at, y, marker="^", color="#1c7ed6", s=70, zorder=4)
             event_times.append(forecast.reset_7d_at)
-        if forecast.reset_opus_at is not None and not pd.isna(forecast.reset_opus_at):
-            ax3.scatter(forecast.reset_opus_at, y, marker="v", color="#7048e8", s=70, zorder=4)
-            event_times.append(forecast.reset_opus_at)
+        if forecast.reset_sonnet_at is not None and not pd.isna(forecast.reset_sonnet_at):
+            ax3.scatter(forecast.reset_sonnet_at, y, marker="v", color="#7048e8", s=70, zorder=4)
+            event_times.append(forecast.reset_sonnet_at)
         if forecast.hits_7d_before_reset and forecast.hours_to_cap_7d != float("inf"):
             limit_time = forecast.latest_timestamp + timedelta(hours=forecast.hours_to_cap_7d)
             ax3.scatter(limit_time, y, marker="x", color="#e03131", s=80, zorder=5)
             event_times.append(limit_time)
-        if forecast.hits_opus_before_reset and forecast.hours_to_cap_opus != float("inf"):
-            limit_time = forecast.latest_timestamp + timedelta(hours=forecast.hours_to_cap_opus)
+        if forecast.hits_sonnet_before_reset and forecast.hours_to_cap_sonnet != float("inf"):
+            limit_time = forecast.latest_timestamp + timedelta(hours=forecast.hours_to_cap_sonnet)
             ax3.scatter(limit_time, y, marker="x", color="#f59f00", s=80, zorder=5)
             event_times.append(limit_time)
 
@@ -683,7 +683,7 @@ def create_visualizations(df: pd.DataFrame, forecasts: Iterable[AccountForecast]
             markerfacecolor="#7048e8",
             markeredgecolor="#7048e8",
             markersize=9,
-            label="Opus reset",
+            label="Sonnet reset",
         ),
         Line2D(
             [0],
@@ -701,7 +701,7 @@ def create_visualizations(df: pd.DataFrame, forecasts: Iterable[AccountForecast]
             linestyle="",
             color="#f59f00",
             markersize=9,
-            label="Opus limit",
+            label="Sonnet limit",
         ),
     ]
     ax3.legend(handles=legend_handles, loc="upper left", frameon=False, ncol=2)
@@ -781,7 +781,7 @@ def generate_usage_report(
             horizon = f.first_limit_hours
         else:
             reset_candidates = [
-                val for val in (f.hours_until_7d_reset, f.hours_until_opus_reset) if val is not None
+                val for val in (f.hours_until_7d_reset, f.hours_until_sonnet_reset) if val is not None
             ]
             horizon = min(reset_candidates) if reset_candidates else float("inf")
         return (

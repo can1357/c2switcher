@@ -9,8 +9,8 @@ Item {
     property var accounts: []
 
     // Calculate data for both bars
-    property var opusData: calculateBarData("seven_day_opus")
-    property var sonnetData: calculateBarData("seven_day")
+    property var sonnetData: calculateBarData("seven_day_sonnet")
+    property var overallData: calculateBarData("seven_day")
 
     function calculateBarData(usageKey) {
         let data = {
@@ -61,20 +61,20 @@ Item {
         anchors.fill: parent
         spacing: Kirigami.Units.largeSpacing
 
-        // Opus Bar
-        BarComponent {
-            Layout.fillWidth: true
-            Layout.preferredHeight: Kirigami.Units.gridUnit * 2.5
-            label: "Opus Usage"
-            barData: usageBar.opusData
-        }
-
         // Sonnet Bar
         BarComponent {
             Layout.fillWidth: true
             Layout.preferredHeight: Kirigami.Units.gridUnit * 2.5
-            label: "Overall Usage (7d)"
+            label: "Sonnet Usage"
             barData: usageBar.sonnetData
+        }
+
+        // Overall Bar
+        BarComponent {
+            Layout.fillWidth: true
+            Layout.preferredHeight: Kirigami.Units.gridUnit * 2.5
+            label: "Overall Usage (7d)"
+            barData: usageBar.overallData
         }
 
         // Legend
@@ -118,7 +118,7 @@ Item {
 
     // Update when accounts change
     onAccountsChanged: {
-        opusData = calculateBarData("seven_day_opus")
-        sonnetData = calculateBarData("seven_day")
+        sonnetData = calculateBarData("seven_day_sonnet")
+        overallData = calculateBarData("seven_day")
     }
 }

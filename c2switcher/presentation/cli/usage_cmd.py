@@ -43,6 +43,10 @@ def _get_account_usage(store, account_uuid: str, credentials_json: str, force: b
                "utilization": cached.seven_day_opus.utilization,
                "resets_at": cached.seven_day_opus.resets_at,
             },
+            "seven_day_sonnet": {
+               "utilization": cached.seven_day_sonnet.utilization,
+               "resets_at": cached.seven_day_sonnet.resets_at,
+            },
             "_cache_source": "cache",
             "_cache_age_seconds": cache_age,
             "_queried_at": cached.queried_at,
@@ -139,7 +143,7 @@ def usage(output_json: bool, force: bool):
       table.add_column("Email", style="green")
       table.add_column("5h", justify="right")
       table.add_column("7d", justify="right")
-      table.add_column("7d Opus", justify="right")
+      table.add_column("7d Sonnet", justify="right")
       table.add_column("Reset (Rate)", justify="right", no_wrap=True)
       table.add_column("Sessions", style="blue", justify="center")
 
@@ -165,7 +169,7 @@ def usage(output_json: bool, force: bool):
 
          five_hour = usage_info.get("five_hour", {}) or {}
          seven_day = usage_info.get("seven_day", {}) or {}
-         seven_day_opus = usage_info.get("seven_day_opus", {}) or {}
+         seven_day_sonnet = usage_info.get("seven_day_sonnet", {}) or {}
 
          def format_usage(value):
             if value is None:
@@ -176,12 +180,12 @@ def usage(output_json: bool, force: bool):
                return f"[yellow]{value}%[/yellow]"
             return f"[green]{value}%[/green]"
 
-         opus_util = seven_day_opus.get("utilization")
+         sonnet_util = seven_day_sonnet.get("utilization")
          overall_util = seven_day.get("utilization")
          reset_time = format_time_until_reset(
-            seven_day_opus.get("resets_at") if seven_day_opus else None,
+            seven_day_sonnet.get("resets_at") if seven_day_sonnet else None,
             seven_day.get("resets_at"),
-            opus_util if opus_util is not None else 0,
+            sonnet_util if sonnet_util is not None else 0,
             overall_util if overall_util is not None else 0,
          )
 
@@ -191,7 +195,7 @@ def usage(output_json: bool, force: bool):
             acc.email,
             format_usage(five_hour.get("utilization")),
             format_usage(seven_day.get("utilization")),
-            format_usage(seven_day_opus.get("utilization")),
+            format_usage(seven_day_sonnet.get("utilization")),
             reset_time,
             session_str,
          )
