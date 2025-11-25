@@ -8,11 +8,12 @@ from .sessions_cmd import start_session_cmd, end_session, list_sessions, session
 from .reports import report_sessions, report_usage
 from .usage_cmd import usage
 from .login import login
+from .apikey import apikey
 
 
 @click.group()
 def cli():
-   """Claude Code Account Switcher - Manage multiple Claude Code accounts."""
+    """Claude Code Account Switcher - Manage multiple Claude Code accounts."""
 
 
 # Register commands
@@ -36,41 +37,43 @@ cli.add_command(report_usage)
 
 cli.add_command(usage)
 
+cli.add_command(apikey)
+
 
 # Aliases
-@cli.command(name="history", hidden=True)
+@cli.command(name='history', hidden=True)
 @click.pass_context
 def history_alias(ctx):
-   """Alias for 'session-history'."""
-   ctx.forward(session_history)
+    """Alias for 'session-history'."""
+    ctx.forward(session_history)
 
 
-@cli.command(name="list", hidden=True)
+@cli.command(name='list', hidden=True)
 @click.pass_context
 def list_alias(ctx):
-   """Alias for 'ls'."""
-   ctx.forward(list_accounts_cmd)
+    """Alias for 'ls'."""
+    ctx.forward(list_accounts_cmd)
 
 
-@cli.command(name="list-accounts", hidden=True)
+@cli.command(name='list-accounts', hidden=True)
 @click.pass_context
 def list_accounts_alias(ctx):
-   """Alias for 'ls'."""
-   ctx.forward(list_accounts_cmd)
+    """Alias for 'ls'."""
+    ctx.forward(list_accounts_cmd)
 
 
-@cli.command(name="pick", hidden=True)
+@cli.command(name='pick', hidden=True)
 @click.pass_context
 def pick(ctx):
-   """Alias for 'optimal'."""
-   ctx.forward(optimal)
+    """Alias for 'optimal'."""
+    ctx.forward(optimal)
 
 
-@cli.command(name="use", hidden=True)
+@cli.command(name='use', hidden=True)
 @click.pass_context
 def use(ctx):
-   """Alias for 'switch'."""
-   ctx.forward(switch)
+    """Alias for 'switch'."""
+    ctx.forward(switch)
 
 
-__all__ = ["cli"]
+__all__ = ['cli']

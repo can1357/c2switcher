@@ -13,19 +13,19 @@ from ..config import load_headers_config
 class ClaudeAPI:
     """Claude API client for profile and usage endpoints."""
 
-    BASE_URL = "https://api.anthropic.com/api/oauth"
+    BASE_URL = 'https://api.anthropic.com/api/oauth'
     TIMEOUT = (5, 20)
 
     @staticmethod
     def _get_headers(token: str) -> Dict[str, str]:
         headers = load_headers_config()
-        headers["authorization"] = f"Bearer {token}"
+        headers['authorization'] = f'Bearer {token}'
         return headers
 
     @staticmethod
     def get_profile(token: str) -> Dict:
         response = requests.get(
-            f"{ClaudeAPI.BASE_URL}/profile",
+            f'{ClaudeAPI.BASE_URL}/profile',
             headers=ClaudeAPI._get_headers(token),
             timeout=ClaudeAPI.TIMEOUT,
         )
@@ -44,7 +44,7 @@ class ClaudeAPI:
 
         for attempt in range(max_retries):
             response = requests.get(
-                f"{ClaudeAPI.BASE_URL}/usage",
+                f'{ClaudeAPI.BASE_URL}/usage',
                 headers=ClaudeAPI._get_headers(token),
                 timeout=ClaudeAPI.TIMEOUT,
             )
@@ -52,11 +52,13 @@ class ClaudeAPI:
             data = response.json()
 
             # Check if we got actual usage data (not all null)
-            has_data = any([
-                data.get('five_hour'),
-                data.get('seven_day'),
-                data.get('seven_day_sonnet')
-            ])
+            has_data = any(
+                [
+                    data.get('five_hour'),
+                    data.get('seven_day'),
+                    data.get('seven_day_sonnet'),
+                ]
+            )
 
             if has_data:
                 return data
@@ -65,8 +67,7 @@ class ClaudeAPI:
 
             # Wait before retry (exponential backoff: 0.5s, 1s)
             if attempt < max_retries - 1:
-                time.sleep(0.5 * (2 ** attempt))
+                time.sleep(0.5 * (2**attempt))
 
         # Return last response even if all null (caller will handle fallback)
         return last_response
-

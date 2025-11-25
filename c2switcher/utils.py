@@ -11,16 +11,16 @@ from typing import Any, Dict, Optional
 
 def mask_email(email: str) -> str:
     """Mask email keeping first 2 and last 2 letters before @."""
-    if "@" not in email:
+    if '@' not in email:
         return email
 
-    local, domain = email.split("@", 1)
+    local, domain = email.split('@', 1)
 
     if len(local) <= 4:
-        return f"{local[0]}***{local[-1]}@{domain}" if len(local) > 1 else f"{local}@{domain}"
+        return f'{local[0]}***{local[-1]}@{domain}' if len(local) > 1 else f'{local}@{domain}'
 
-    masked_local = f"{local[:2]}{'*' * (len(local) - 4)}{local[-2:]}"
-    return f"{masked_local}@{domain}"
+    masked_local = f'{local[:2]}{"*" * (len(local) - 4)}{local[-2:]}'
+    return f'{masked_local}@{domain}'
 
 
 def format_time_until_reset(
@@ -33,10 +33,10 @@ def format_time_until_reset(
     display_reset = opus_resets_at if opus_resets_at else overall_resets_at
 
     if not display_reset:
-        return "[dim]--[/dim]"
+        return '[dim]--[/dim]'
 
     try:
-        reset_dt = datetime.fromisoformat(display_reset.replace("Z", "+00:00"))
+        reset_dt = datetime.fromisoformat(display_reset.replace('Z', '+00:00'))
         if reset_dt.tzinfo is None:
             reset_dt = reset_dt.replace(tzinfo=timezone.utc)
 
@@ -44,7 +44,7 @@ def format_time_until_reset(
         time_remaining = reset_dt - now
 
         if time_remaining.total_seconds() <= 0:
-            return "[dim]expired[/dim]"
+            return '[dim]expired[/dim]'
 
         total_seconds = int(time_remaining.total_seconds())
         days = total_seconds // 86400
@@ -52,20 +52,20 @@ def format_time_until_reset(
         minutes = (total_seconds % 3600) // 60
 
         if days > 0:
-            time_str = f"{days}d{hours}h"
+            time_str = f'{days}d{hours}h'
         elif hours > 0:
-            time_str = f"{hours}h{minutes}m"
+            time_str = f'{hours}h{minutes}m'
         else:
-            time_str = f"{minutes}m"
+            time_str = f'{minutes}m'
 
-        rate_str = ""
+        rate_str = ''
         if opus_usage is not None or overall_usage is not None:
             seven_days_seconds = 7 * 86400
             worst_rate = 0.0
 
             if opus_usage is not None and opus_resets_at:
                 try:
-                    opus_reset_dt = datetime.fromisoformat(opus_resets_at.replace("Z", "+00:00"))
+                    opus_reset_dt = datetime.fromisoformat(opus_resets_at.replace('Z', '+00:00'))
                     if opus_reset_dt.tzinfo is None:
                         opus_reset_dt = opus_reset_dt.replace(tzinfo=timezone.utc)
 
@@ -81,7 +81,7 @@ def format_time_until_reset(
 
             if overall_usage is not None and overall_resets_at:
                 try:
-                    overall_reset_dt = datetime.fromisoformat(overall_resets_at.replace("Z", "+00:00"))
+                    overall_reset_dt = datetime.fromisoformat(overall_resets_at.replace('Z', '+00:00'))
                     if overall_reset_dt.tzinfo is None:
                         overall_reset_dt = overall_reset_dt.replace(tzinfo=timezone.utc)
 
@@ -97,16 +97,16 @@ def format_time_until_reset(
 
             if worst_rate > 0:
                 if worst_rate >= 120:
-                    rate_str = f" [red]({worst_rate:.0f}%)[/red]"
+                    rate_str = f' [red]({worst_rate:.0f}%)[/red]'
                 elif worst_rate >= 100:
-                    rate_str = f" [yellow]({worst_rate:.0f}%)[/yellow]"
+                    rate_str = f' [yellow]({worst_rate:.0f}%)[/yellow]'
                 else:
-                    rate_str = f" [green]({worst_rate:.0f}%)[/green]"
+                    rate_str = f' [green]({worst_rate:.0f}%)[/green]'
 
         return time_str + rate_str
 
     except Exception:
-        return "[dim]--[/dim]"
+        return '[dim]--[/dim]'
 
 
 def atomic_write_json(path: Path, data: Dict[str, Any], preserve_permissions: bool = True):
@@ -125,11 +125,11 @@ def atomic_write_json(path: Path, data: Dict[str, Any], preserve_permissions: bo
         except OSError:
             pass
 
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path = path.with_suffix(path.suffix + '.tmp')
     try:
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
                 json.dump(data, handle)
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -149,7 +149,7 @@ def atomic_write_json(path: Path, data: Dict[str, Any], preserve_permissions: bo
 def parse_sqlite_timestamp_to_local(timestamp: Any) -> datetime:
     """Convert a SQLite timestamp to naive local datetime."""
     if isinstance(timestamp, str):
-        dt_utc = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        dt_utc = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
         if dt_utc.tzinfo is None:
             dt_utc = dt_utc.replace(tzinfo=timezone.utc)
         return dt_utc.astimezone().replace(tzinfo=None)

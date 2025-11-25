@@ -5,15 +5,14 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
-from ..constants import CACHE_TTL_SECONDS, STALE_CACHE_SECONDS, console
+from ..constants import CACHE_TTL_SECONDS, console
 from ..core.errors import NoAccountsAvailable, UsageFetchError
 from ..core.load_balancing import (
-   build_candidate,
-   needs_refresh,
-   select_best_candidate,
-   select_top_similar_candidates,
+    build_candidate,
+    needs_refresh,
+    select_top_similar_candidates,
 )
 from ..core.models import Account, Candidate, SelectionDecision, UsageSnapshot
 from ..data.credential_store import CredentialStore
@@ -23,438 +22,471 @@ from ..services.sessions import SessionService
 
 
 class SwitchingService:
-   """
-   Orchestrates account selection and credential switching.
+    """
+    Orchestrates account selection and credential switching.
 
-   Responsibilities:
-   - Load-balanced account selection
-   - Usage cache hydration
-   - Credential file writes
-   - Session reuse
-   """
+    Responsibilities:
+    - Load-balanced account selection
+    - Usage cache hydration
+    - Credential file writes
+    - Session reuse
+    """
 
-   def __init__(
-      self, store: Store, credential_store: CredentialStore, session_service: SessionService
-   ):
-      self.store = store
-      self.credential_store = credential_store
-      self.session_service = session_service
+    def __init__(
+        self,
+        store: Store,
+        credential_store: CredentialStore,
+        session_service: SessionService,
+    ):
+        self.store = store
+        self.credential_store = credential_store
+        self.session_service = session_service
 
-   def select_optimal(
-      self, session_id: Optional[str] = None, token_only: bool = False, dry_run: bool = False
-   ) -> SelectionDecision:
-      """
-      Select best account using load balancing.
+    def select_optimal(
+        self,
+        session_id: Optional[str] = None,
+        token_only: bool = False,
+        dry_run: bool = False,
+    ) -> SelectionDecision:
+        """
+        Select best account using load balancing.
 
-      Args:
-         session_id: Optional session to bind account to
-         token_only: Skip writing full credentials file (still refresh tokens unless dry-run)
-         dry_run: Skip credential writes/DB persistence for the final switch step
+        Args:
+           session_id: Optional session to bind account to
+           token_only: Skip writing full credentials file (still refresh tokens unless dry-run)
+           dry_run: Skip credential writes/DB persistence for the final switch step
 
-      Returns:
-         SelectionDecision with account and diagnostics
+        Returns:
+           SelectionDecision with account and diagnostics
 
-      Raises:
-         NoAccountsAvailable: If no usable accounts
-      """
-      # Cleanup sessions periodically
-      self.session_service.maybe_cleanup()
+        Raises:
+           NoAccountsAvailable: If no usable accounts
+        """
+        # Cleanup sessions periodically
+        self.session_service.maybe_cleanup()
 
-      # Try session reuse
-      if session_id:
-         reused = self._try_reuse_session(session_id)
-         if reused:
-            if not dry_run:
-               refreshed_creds = reused.account.get_credentials()
-               if not token_only:
-                  self.credential_store.write_credentials(refreshed_creds)
-            return reused
+        # Try session reuse
+        if session_id:
+            reused = self._try_reuse_session(session_id)
+            if reused:
+                if not dry_run:
+                    refreshed_creds = reused.account.get_credentials()
+                    if not token_only:
+                        self.credential_store.write_credentials(refreshed_creds)
+                return reused
 
-      # Get all accounts
-      accounts = self.store.list_accounts()
-      if not accounts:
-         raise NoAccountsAvailable("No accounts registered")
+        # Get all accounts
+        accounts = self.store.list_accounts()
+        if not accounts:
+            raise NoAccountsAvailable('No accounts registered')
 
-      # Collect cached usage
-      usage_map, missing_accounts = self._collect_cached_usage(accounts)
+        # Collect cached usage
+        usage_map, missing_accounts = self._collect_cached_usage(accounts)
 
-      # Fetch missing usage
-      if missing_accounts:
-         fetched = self._fetch_usage_batch(missing_accounts, label="initial")
-         usage_map.update(fetched)
+        # Fetch missing usage
+        if missing_accounts:
+            fetched = self._fetch_usage_batch(missing_accounts, label='initial')
+            usage_map.update(fetched)
 
-      if not usage_map:
-         raise NoAccountsAvailable("Could not fetch usage for any account")
+        if not usage_map:
+            raise NoAccountsAvailable('Could not fetch usage for any account')
 
-      # Build candidates
-      active_counts = self.store.get_active_session_counts()
-      recent_counts = self.store.get_recent_session_counts(minutes=5)
-      burst_cache: Dict[str, float] = {}
-      refreshed_ids: Set[str] = set()
+        # Build candidates
+        active_counts = self.store.get_active_session_counts()
+        recent_counts = self.store.get_recent_session_counts(minutes=5)
+        burst_cache: Dict[str, float] = {}
+        refreshed_ids: Set[str] = set()
 
-      candidates = self._build_candidates(
-         accounts, usage_map, active_counts, recent_counts, burst_cache, refreshed_ids
-      )
+        candidates = self._build_candidates(
+            accounts,
+            usage_map,
+            active_counts,
+            recent_counts,
+            burst_cache,
+            refreshed_ids,
+        )
 
-      # Refresh stale high-priority candidates
-      refresh_accounts = []
-      for acc in accounts:
-         if acc.uuid not in usage_map:
-            continue
-         candidate = self._find_candidate(candidates, acc.uuid)
-         if candidate and needs_refresh(candidate):
-            refresh_accounts.append(acc)
+        # Refresh stale high-priority candidates
+        refresh_accounts = []
+        for acc in accounts:
+            if acc.uuid not in usage_map:
+                continue
+            candidate = self._find_candidate(candidates, acc.uuid)
+            if candidate and needs_refresh(candidate):
+                refresh_accounts.append(acc)
 
-      if refresh_accounts:
-         refreshed = self._fetch_usage_batch(refresh_accounts, label="refresh")
-         usage_map.update(refreshed)
-         for uuid in refreshed.keys():
-            refreshed_ids.add(uuid)
+        if refresh_accounts:
+            refreshed = self._fetch_usage_batch(refresh_accounts, label='refresh')
+            usage_map.update(refreshed)
+            for uuid in refreshed.keys():
+                refreshed_ids.add(uuid)
 
-         # Rebuild candidates with fresh data
-         candidates = self._build_candidates(
-            accounts, usage_map, active_counts, recent_counts, burst_cache, refreshed_ids
-         )
+            # Rebuild candidates with fresh data
+            candidates = self._build_candidates(
+                accounts,
+                usage_map,
+                active_counts,
+                recent_counts,
+                burst_cache,
+                refreshed_ids,
+            )
 
-      # Select best with round-robin for similar candidates
-      similar = select_top_similar_candidates(candidates)
-      if not similar:
-         raise NoAccountsAvailable("All accounts exhausted")
+        # Select best with round-robin for similar candidates
+        similar = select_top_similar_candidates(candidates)
+        if not similar:
+            raise NoAccountsAvailable('All accounts exhausted')
 
-      selected = self._choose_round_robin(similar, active_counts, recent_counts)
-      if not selected:
-         selected = similar[0]
+        selected = self._choose_round_robin(similar, active_counts, recent_counts)
+        if not selected:
+            selected = similar[0]
 
-      # Bind session (skip during dry-run)
-      if session_id and not dry_run:
-         self.store.assign_session_to_account(session_id, selected.account.uuid)
+        # Bind session (skip during dry-run)
+        if session_id and not dry_run:
+            self.store.assign_session_to_account(session_id, selected.account.uuid)
 
-      refreshed_creds = None
+        refreshed_creds = None
 
-      if dry_run:
-         # Keep current credentials in-memory for downstream consumers
-         refreshed_creds = selected.account.get_credentials()
-      else:
-         # Refresh credentials to ensure valid token for switching/token-only flows
-         refreshed_creds = self.credential_store.refresh_access_token(
-            selected.account.credentials_json
-         )
+        if dry_run:
+            # Keep current credentials in-memory for downstream consumers
+            refreshed_creds = selected.account.get_credentials()
+        else:
+            # Refresh credentials to ensure valid token for switching/token-only flows
+            refreshed_creds = self.credential_store.refresh_access_token(selected.account.credentials_json)
 
-         if not token_only:
+            if not token_only:
+                self.credential_store.write_credentials(refreshed_creds)
+
+            # Update stored credentials if changed
+            if refreshed_creds != selected.account.get_credentials():
+                self.store.update_credentials(selected.account.uuid, refreshed_creds)
+                # Update in-memory Account so returned SelectionDecision has fresh credentials
+                selected.account.credentials_json = json.dumps(refreshed_creds)
+
+        return SelectionDecision.from_candidate(selected, reused=False)
+
+    def switch_to(self, identifier: str, token_only: bool = False) -> Account:
+        """
+        Switch to specific account by identifier.
+
+        Args:
+           identifier: index, uuid, nickname, or email
+           token_only: Skip writing full credentials file
+
+        Returns:
+           Selected Account
+        """
+        account = self.store.get_account_by_identifier(identifier)
+        if not account:
+            raise NoAccountsAvailable(f'Account not found: {identifier}')
+
+        refreshed_creds = self.credential_store.refresh_access_token(account.credentials_json)
+
+        if not token_only:
             self.credential_store.write_credentials(refreshed_creds)
 
-         # Update stored credentials if changed
-         if refreshed_creds != selected.account.get_credentials():
-            self.store.update_credentials(selected.account.uuid, refreshed_creds)
-            # Update in-memory Account so returned SelectionDecision has fresh credentials
-            selected.account.credentials_json = json.dumps(refreshed_creds)
+        # Update stored credentials if changed
+        if refreshed_creds != account.get_credentials():
+            self.store.update_credentials(account.uuid, refreshed_creds)
+            # Update in-memory Account so caller gets fresh credentials
+            account.credentials_json = json.dumps(refreshed_creds)
 
-      return SelectionDecision.from_candidate(selected, reused=False)
+        return account
 
-   def switch_to(self, identifier: str, token_only: bool = False) -> Account:
-      """
-      Switch to specific account by identifier.
+    def _choose_round_robin(
+        self,
+        candidates: List[Candidate],
+        active_counts: Dict[str, int],
+        recent_counts: Dict[str, int],
+    ) -> Optional[Candidate]:
+        """
+        Select from similar candidates using round-robin.
 
-      Args:
-         identifier: index, uuid, nickname, or email
-         token_only: Skip writing full credentials file
+        Prioritizes:
+        1. Candidates with fewest active sessions
+        2. Candidates with fewest recent sessions
+        3. Round-robin based on last-selected UUID stored in DB
+        """
+        if len(candidates) == 1:
+            return candidates[0]
 
-      Returns:
-         Selected Account
-      """
-      account = self.store.get_account_by_identifier(identifier)
-      if not account:
-         raise NoAccountsAvailable(f"Account not found: {identifier}")
+        # Filter by minimum active sessions
+        min_active = min(active_counts.get(c.account.uuid, 0) for c in candidates)
+        pool = [c for c in candidates if active_counts.get(c.account.uuid, 0) == min_active]
 
-      refreshed_creds = self.credential_store.refresh_access_token(account.credentials_json)
+        # Filter by minimum recent sessions
+        min_recent = min(recent_counts.get(c.account.uuid, 0) for c in pool)
+        pool = [c for c in pool if recent_counts.get(c.account.uuid, 0) == min_recent]
 
-      if not token_only:
-         self.credential_store.write_credentials(refreshed_creds)
+        # Sort by index for deterministic ordering
+        pool.sort(key=lambda c: c.account.index_num)
 
-      # Update stored credentials if changed
-      if refreshed_creds != account.get_credentials():
-         self.store.update_credentials(account.uuid, refreshed_creds)
-         # Update in-memory Account so caller gets fresh credentials
-         account.credentials_json = json.dumps(refreshed_creds)
+        # Round-robin based on DB state
+        window = f'tier_{pool[0].tier}'
+        last_uuid = self.store.get_round_robin_last(window)
 
-      return account
+        # Find next in rotation
+        candidate_uuids = [c.account.uuid for c in pool]
+        next_idx = 0
 
-   def _choose_round_robin(
-      self, candidates: List[Candidate], active_counts: Dict[str, int], recent_counts: Dict[str, int]
-   ) -> Optional[Candidate]:
-      """
-      Select from similar candidates using round-robin.
+        if last_uuid and last_uuid in candidate_uuids:
+            for idx, cand in enumerate(pool):
+                if cand.account.uuid == last_uuid:
+                    next_idx = (idx + 1) % len(pool)
+                    break
 
-      Prioritizes:
-      1. Candidates with fewest active sessions
-      2. Candidates with fewest recent sessions
-      3. Round-robin based on last-selected UUID stored in DB
-      """
-      if len(candidates) == 1:
-         return candidates[0]
+        selected = pool[next_idx]
 
-      # Filter by minimum active sessions
-      min_active = min(active_counts.get(c.account.uuid, 0) for c in candidates)
-      pool = [c for c in candidates if active_counts.get(c.account.uuid, 0) == min_active]
+        # Update DB state
+        self.store.set_round_robin_last(window, selected.account.uuid)
 
-      # Filter by minimum recent sessions
-      min_recent = min(recent_counts.get(c.account.uuid, 0) for c in pool)
-      pool = [c for c in pool if recent_counts.get(c.account.uuid, 0) == min_recent]
+        return selected
 
-      # Sort by index for deterministic ordering
-      pool.sort(key=lambda c: c.account.index_num)
+    def _try_reuse_session(self, session_id: str) -> Optional[SelectionDecision]:
+        """Attempt to reuse existing session account."""
+        result = self.store.get_session_account(session_id)
+        if not result:
+            return None
 
-      # Round-robin based on DB state
-      window = f"tier_{pool[0].tier}"
-      last_uuid = self.store.get_round_robin_last(window)
+        session, account = result
 
-      # Find next in rotation
-      candidate_uuids = [c.account.uuid for c in pool]
-      next_idx = 0
+        # Check if account still usable
+        try:
+            usage = self._fetch_usage_for_account(account)
+            sonnet = usage.seven_day_sonnet.utilization
+            overall = usage.seven_day.utilization
 
-      if last_uuid and last_uuid in candidate_uuids:
-         for idx, cand in enumerate(pool):
-            if cand.account.uuid == last_uuid:
-               next_idx = (idx + 1) % len(pool)
-               break
+            sonnet_ok = sonnet is None or float(sonnet) < 99
+            overall_ok = overall is None or float(overall) < 99
 
-      selected = pool[next_idx]
+            if sonnet_ok and overall_ok:
+                # Build decision from reuse
+                active_counts = self.store.get_active_session_counts()
+                recent_counts = self.store.get_recent_session_counts(minutes=5)
+                burst_buffer = self.store.get_burst_percentile(account.uuid)
 
-      # Update DB state
-      self.store.set_round_robin_last(window, selected.account.uuid)
+                candidate = build_candidate(
+                    account,
+                    usage,
+                    burst_buffer,
+                    active_counts.get(account.uuid, 0),
+                    recent_counts.get(account.uuid, 0),
+                    refreshed=True,
+                )
 
-      return selected
+                if candidate:
+                    return SelectionDecision.from_candidate(candidate, reused=True)
 
-   def _try_reuse_session(self, session_id: str) -> Optional[SelectionDecision]:
-      """Attempt to reuse existing session account."""
-      result = self.store.get_session_account(session_id)
-      if not result:
-         return None
+        except Exception:
+            pass
 
-      session, account = result
+        return None
 
-      # Check if account still usable
-      try:
-         usage = self._fetch_usage_for_account(account)
-         sonnet = usage.seven_day_sonnet.utilization
-         overall = usage.seven_day.utilization
+    def _collect_cached_usage(self, accounts: List[Account]) -> tuple[Dict[str, UsageSnapshot], List[Account]]:
+        """Collect cached usage and identify missing accounts."""
+        usage_map: Dict[str, UsageSnapshot] = {}
+        missing: List[Account] = []
 
-         sonnet_ok = sonnet is None or float(sonnet) < 99
-         overall_ok = overall is None or float(overall) < 99
+        for account in accounts:
+            cached = self.store.get_recent_usage(account.uuid, max_age_seconds=CACHE_TTL_SECONDS)
+            if cached:
+                usage_map[account.uuid] = cached
+            else:
+                missing.append(account)
 
-         if sonnet_ok and overall_ok:
-            # Build decision from reuse
-            active_counts = self.store.get_active_session_counts()
-            recent_counts = self.store.get_recent_session_counts(minutes=5)
-            burst_buffer = self.store.get_burst_percentile(account.uuid)
+        return usage_map, missing
+
+    def _fetch_usage_for_account(self, account: Account) -> UsageSnapshot:
+        """Fetch live usage for single account."""
+        usage_data, refreshed_creds = self._refresh_usage_payload(account)
+        return self._persist_usage_result(account, usage_data, refreshed_creds)
+
+    def _fetch_usage_batch(self, accounts: List[Account], label: str = 'batch') -> Dict[str, UsageSnapshot]:
+        """
+        Fetch usage in parallel for multiple accounts.
+
+        Fetches data in parallel threads, then persists sequentially to avoid SQLite threading issues.
+        """
+        if not accounts:
+            return {}
+
+        # Fetch in parallel (API calls only, no DB access)
+        fetch_results: List[Tuple[Account, Dict, Dict]] = []
+        max_workers = min(len(accounts), 10)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {executor.submit(self._refresh_usage_payload, acc): acc for acc in accounts}
+
+            for future in as_completed(future_map):
+                account = future_map[future]
+                try:
+                    usage_data, refreshed_creds = future.result()
+                    fetch_results.append((account, usage_data, refreshed_creds))
+                except Exception as exc:
+                    console.print(
+                        f'[yellow]Warning: Could not fetch usage for {account.email} ({label}): {exc}[/yellow]'
+                    )
+
+        # Persist sequentially (DB writes happen serially to avoid threading issues)
+        results: Dict[str, UsageSnapshot] = {}
+        for account, usage_data, refreshed_creds in fetch_results:
+            usage = self._persist_usage_result(account, usage_data, refreshed_creds)
+            results[account.uuid] = usage
+
+        return results
+
+    def _refresh_usage_payload(self, account: Account) -> tuple[Dict, Dict]:
+        """
+        Fetch usage data and refreshed credentials without touching persistence.
+
+        Falls back to cached data (up to 24h old) if API returns all null fields,
+        which happens intermittently due to an Anthropic API bug.
+        """
+        refreshed_creds = self.credential_store.refresh_access_token(account.credentials_json)
+        token = refreshed_creds.get('claudeAiOauth', {}).get('accessToken')
+
+        if not token:
+            raise UsageFetchError('No access token')
+
+        usage_data = ClaudeAPI.get_usage(token)
+
+        # Check if API returned all null (intermittent API issue)
+        has_data = any(
+            [
+                usage_data.get('five_hour'),
+                usage_data.get('seven_day'),
+                usage_data.get('seven_day_sonnet'),
+            ]
+        )
+
+        if not has_data:
+            # Fall back to last cached usage with actual data (up to 24 hours old, skip null records)
+            cached = self.store.get_recent_usage(account.uuid, max_age_seconds=86400, require_data=True)
+            if cached:
+                # Use cached data instead of nulls
+                console.print(
+                    f'[yellow]API returned null for {account.email}, using cached data ({cached.cache_age_seconds:.0f}s old)[/yellow]'
+                )
+
+                # Reconstruct usage_data from cached snapshot
+                usage_data = {
+                    'five_hour': (
+                        {
+                            'utilization': cached.five_hour.utilization,
+                            'resets_at': cached.five_hour.resets_at,
+                        }
+                        if cached.five_hour.utilization is not None
+                        else None
+                    ),
+                    'seven_day': (
+                        {
+                            'utilization': cached.seven_day.utilization,
+                            'resets_at': cached.seven_day.resets_at,
+                        }
+                        if cached.seven_day.utilization is not None
+                        else None
+                    ),
+                    'seven_day_opus': (
+                        {
+                            'utilization': cached.seven_day_opus.utilization,
+                            'resets_at': cached.seven_day_opus.resets_at,
+                        }
+                        if cached.seven_day_opus.utilization is not None
+                        else None
+                    ),
+                    'seven_day_sonnet': (
+                        {
+                            'utilization': cached.seven_day_sonnet.utilization,
+                            'resets_at': cached.seven_day_sonnet.resets_at,
+                        }
+                        if cached.seven_day_sonnet.utilization is not None
+                        else None
+                    ),
+                    'seven_day_oauth_apps': None,
+                    'iguana_necktie': None,
+                    'extra_usage': usage_data.get('extra_usage'),
+                    '_cache_source': 'fallback',
+                    '_cache_age_seconds': cached.cache_age_seconds,
+                    '_queried_at': cached.queried_at,
+                }
+                return usage_data, refreshed_creds
+
+        usage_data['_cache_source'] = 'live'
+        usage_data['_cache_age_seconds'] = 0.0
+        usage_data['_queried_at'] = datetime.now(timezone.utc).isoformat()
+
+        return usage_data, refreshed_creds
+
+    def _persist_usage_result(self, account: Account, usage_data: Dict, refreshed_creds: Dict) -> UsageSnapshot:
+        """
+        Persist usage + credentials updates and return snapshot.
+
+        Skips saving usage if all fields are null to avoid overwriting good cached data.
+        """
+        usage_to_store = {k: v for k, v in usage_data.items() if not k.startswith('_')}
+
+        # Only save if we have actual data (avoid overwriting cache with nulls)
+        has_data = any(
+            [
+                usage_to_store.get('five_hour'),
+                usage_to_store.get('seven_day'),
+                usage_to_store.get('seven_day_sonnet'),
+            ]
+        )
+
+        if has_data or usage_data.get('_cache_source') == 'fallback':
+            # Save if we have real data OR if we're saving fallback data (already from cache)
+            self.store.save_usage(account.uuid, usage_to_store)
+        else:
+            console.print(f'[yellow]Skipping DB save for {account.email} (API returned all null)[/yellow]')
+
+        current_creds = account.get_credentials()
+        if refreshed_creds != current_creds:
+            self.store.update_credentials(account.uuid, refreshed_creds)
+            account.credentials_json = json.dumps(refreshed_creds)
+
+        # Determine source for snapshot
+        source = usage_data.get('_cache_source', 'live')
+        return UsageSnapshot.from_api_response(account.uuid, usage_data, source=source)
+
+    def _build_candidates(
+        self,
+        accounts: List[Account],
+        usage_map: Dict[str, UsageSnapshot],
+        active_counts: Dict[str, int],
+        recent_counts: Dict[str, int],
+        burst_cache: Dict[str, float],
+        refreshed_ids: Set[str],
+    ) -> List[Candidate]:
+        """Build candidate list with scoring."""
+        candidates: List[Candidate] = []
+
+        for account in accounts:
+            usage = usage_map.get(account.uuid)
+            if not usage:
+                continue
+
+            burst_buffer = burst_cache.get(account.uuid)
+            if burst_buffer is None or account.uuid in refreshed_ids:
+                burst_buffer = self.store.get_burst_percentile(account.uuid)
+                burst_cache[account.uuid] = burst_buffer
 
             candidate = build_candidate(
-               account,
-               usage,
-               burst_buffer,
-               active_counts.get(account.uuid, 0),
-               recent_counts.get(account.uuid, 0),
-               refreshed=True,
+                account,
+                usage,
+                burst_buffer,
+                active_counts.get(account.uuid, 0),
+                recent_counts.get(account.uuid, 0),
+                refreshed=account.uuid in refreshed_ids,
             )
 
             if candidate:
-               return SelectionDecision.from_candidate(candidate, reused=True)
+                candidates.append(candidate)
 
-      except Exception:
-         pass
+        return candidates
 
-      return None
-
-   def _collect_cached_usage(
-      self, accounts: List[Account]
-   ) -> tuple[Dict[str, UsageSnapshot], List[Account]]:
-      """Collect cached usage and identify missing accounts."""
-      usage_map: Dict[str, UsageSnapshot] = {}
-      missing: List[Account] = []
-
-      for account in accounts:
-         cached = self.store.get_recent_usage(account.uuid, max_age_seconds=CACHE_TTL_SECONDS)
-         if cached:
-            usage_map[account.uuid] = cached
-         else:
-            missing.append(account)
-
-      return usage_map, missing
-
-   def _fetch_usage_for_account(self, account: Account) -> UsageSnapshot:
-      """Fetch live usage for single account."""
-      usage_data, refreshed_creds = self._refresh_usage_payload(account)
-      return self._persist_usage_result(account, usage_data, refreshed_creds)
-
-   def _fetch_usage_batch(
-      self, accounts: List[Account], label: str = "batch"
-   ) -> Dict[str, UsageSnapshot]:
-      """
-      Fetch usage in parallel for multiple accounts.
-
-      Fetches data in parallel threads, then persists sequentially to avoid SQLite threading issues.
-      """
-      if not accounts:
-         return {}
-
-      # Fetch in parallel (API calls only, no DB access)
-      fetch_results: List[Tuple[Account, Dict, Dict]] = []
-      max_workers = min(len(accounts), 10)
-
-      with ThreadPoolExecutor(max_workers=max_workers) as executor:
-         future_map = {executor.submit(self._refresh_usage_payload, acc): acc for acc in accounts}
-
-         for future in as_completed(future_map):
-            account = future_map[future]
-            try:
-               usage_data, refreshed_creds = future.result()
-               fetch_results.append((account, usage_data, refreshed_creds))
-            except Exception as exc:
-               console.print(
-                  f"[yellow]Warning: Could not fetch usage for {account.email} ({label}): {exc}[/yellow]"
-               )
-
-      # Persist sequentially (DB writes happen serially to avoid threading issues)
-      results: Dict[str, UsageSnapshot] = {}
-      for account, usage_data, refreshed_creds in fetch_results:
-         usage = self._persist_usage_result(account, usage_data, refreshed_creds)
-         results[account.uuid] = usage
-
-      return results
-
-   def _refresh_usage_payload(self, account: Account) -> tuple[Dict, Dict]:
-      """
-      Fetch usage data and refreshed credentials without touching persistence.
-
-      Falls back to cached data (up to 24h old) if API returns all null fields,
-      which happens intermittently due to an Anthropic API bug.
-      """
-      refreshed_creds = self.credential_store.refresh_access_token(account.credentials_json)
-      token = refreshed_creds.get("claudeAiOauth", {}).get("accessToken")
-
-      if not token:
-         raise UsageFetchError("No access token")
-
-      usage_data = ClaudeAPI.get_usage(token)
-
-      # Check if API returned all null (intermittent API issue)
-      has_data = any([
-         usage_data.get('five_hour'),
-         usage_data.get('seven_day'),
-         usage_data.get('seven_day_sonnet')
-      ])
-
-      if not has_data:
-         # Fall back to last cached usage with actual data (up to 24 hours old, skip null records)
-         cached = self.store.get_recent_usage(account.uuid, max_age_seconds=86400, require_data=True)
-         if cached:
-            # Use cached data instead of nulls
-            console.print(f"[yellow]API returned null for {account.email}, using cached data ({cached.cache_age_seconds:.0f}s old)[/yellow]")
-
-            # Reconstruct usage_data from cached snapshot
-            usage_data = {
-               "five_hour": {
-                  "utilization": cached.five_hour.utilization,
-                  "resets_at": cached.five_hour.resets_at,
-               } if cached.five_hour.utilization is not None else None,
-               "seven_day": {
-                  "utilization": cached.seven_day.utilization,
-                  "resets_at": cached.seven_day.resets_at,
-               } if cached.seven_day.utilization is not None else None,
-               "seven_day_opus": {
-                  "utilization": cached.seven_day_opus.utilization,
-                  "resets_at": cached.seven_day_opus.resets_at,
-               } if cached.seven_day_opus.utilization is not None else None,
-               "seven_day_sonnet": {
-                  "utilization": cached.seven_day_sonnet.utilization,
-                  "resets_at": cached.seven_day_sonnet.resets_at,
-               } if cached.seven_day_sonnet.utilization is not None else None,
-               "seven_day_oauth_apps": None,
-               "iguana_necktie": None,
-               "extra_usage": usage_data.get("extra_usage"),
-               "_cache_source": "fallback",
-               "_cache_age_seconds": cached.cache_age_seconds,
-               "_queried_at": cached.queried_at,
-            }
-            return usage_data, refreshed_creds
-
-      usage_data["_cache_source"] = "live"
-      usage_data["_cache_age_seconds"] = 0.0
-      usage_data["_queried_at"] = datetime.now(timezone.utc).isoformat()
-
-      return usage_data, refreshed_creds
-
-   def _persist_usage_result(
-      self, account: Account, usage_data: Dict, refreshed_creds: Dict
-   ) -> UsageSnapshot:
-      """
-      Persist usage + credentials updates and return snapshot.
-
-      Skips saving usage if all fields are null to avoid overwriting good cached data.
-      """
-      usage_to_store = {k: v for k, v in usage_data.items() if not k.startswith("_")}
-
-      # Only save if we have actual data (avoid overwriting cache with nulls)
-      has_data = any([
-         usage_to_store.get('five_hour'),
-         usage_to_store.get('seven_day'),
-         usage_to_store.get('seven_day_sonnet')
-      ])
-
-      if has_data or usage_data.get("_cache_source") == "fallback":
-         # Save if we have real data OR if we're saving fallback data (already from cache)
-         self.store.save_usage(account.uuid, usage_to_store)
-      else:
-         console.print(f"[yellow]Skipping DB save for {account.email} (API returned all null)[/yellow]")
-
-      current_creds = account.get_credentials()
-      if refreshed_creds != current_creds:
-         self.store.update_credentials(account.uuid, refreshed_creds)
-         account.credentials_json = json.dumps(refreshed_creds)
-
-      # Determine source for snapshot
-      source = usage_data.get("_cache_source", "live")
-      return UsageSnapshot.from_api_response(account.uuid, usage_data, source=source)
-
-   def _build_candidates(
-      self,
-      accounts: List[Account],
-      usage_map: Dict[str, UsageSnapshot],
-      active_counts: Dict[str, int],
-      recent_counts: Dict[str, int],
-      burst_cache: Dict[str, float],
-      refreshed_ids: Set[str],
-   ) -> List[Candidate]:
-      """Build candidate list with scoring."""
-      candidates: List[Candidate] = []
-
-      for account in accounts:
-         usage = usage_map.get(account.uuid)
-         if not usage:
-            continue
-
-         burst_buffer = burst_cache.get(account.uuid)
-         if burst_buffer is None or account.uuid in refreshed_ids:
-            burst_buffer = self.store.get_burst_percentile(account.uuid)
-            burst_cache[account.uuid] = burst_buffer
-
-         candidate = build_candidate(
-            account,
-            usage,
-            burst_buffer,
-            active_counts.get(account.uuid, 0),
-            recent_counts.get(account.uuid, 0),
-            refreshed=account.uuid in refreshed_ids,
-         )
-
-         if candidate:
-            candidates.append(candidate)
-
-      return candidates
-
-   def _find_candidate(self, candidates: List[Candidate], account_uuid: str) -> Optional[Candidate]:
-      """Find candidate by account UUID."""
-      for cand in candidates:
-         if cand.account.uuid == account_uuid:
-            return cand
-      return None
+    def _find_candidate(self, candidates: List[Candidate], account_uuid: str) -> Optional[Candidate]:
+        """Find candidate by account UUID."""
+        for cand in candidates:
+            if cand.account.uuid == account_uuid:
+                return cand
+        return None

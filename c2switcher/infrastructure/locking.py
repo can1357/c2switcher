@@ -14,7 +14,7 @@ from filelock import FileLock as FileLocker, Timeout as FileLockTimeout
 
 from ..constants import LOCK_PATH, console
 
-_lock_acquired: Optional["FileLock"] = None
+_lock_acquired: Optional['FileLock'] = None
 
 
 class FileLock:
@@ -22,7 +22,7 @@ class FileLock:
 
     def __init__(self, lock_path: Path = LOCK_PATH):
         self.lock_path = lock_path
-        self.pid_path = lock_path.with_suffix(".pid")
+        self.pid_path = lock_path.with_suffix('.pid')
         self.lock = FileLocker(str(lock_path), timeout=-1)
         self.acquired = False
 
@@ -45,15 +45,15 @@ class FileLock:
 
                 try:
                     fd = os.open(self.pid_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                    with os.fdopen(fd, "w") as handle:
-                        handle.write(f"{os.getpid()}\n")
+                    with os.fdopen(fd, 'w') as handle:
+                        handle.write(f'{os.getpid()}\n')
                         handle.flush()
                         os.fsync(handle.fileno())
                 except OSError:
                     pass
 
                 if shown_waiting_msg:
-                    console.print("[green]✓ Lock acquired[/green]")
+                    console.print('[green]✓ Lock acquired[/green]')
                 return
 
             except FileLockTimeout:
@@ -64,36 +64,36 @@ class FileLock:
                     pid_info = self._read_pid()
                     if pid_info:
                         console.print(
-                            f"[red]Error: Timeout waiting for c2switcher operation (PID: {pid_info}) to complete[/red]"
+                            f'[red]Error: Timeout waiting for c2switcher operation (PID: {pid_info}) to complete[/red]'
                         )
                     else:
-                        console.print("[red]Error: Timeout waiting for c2switcher operation to complete[/red]")
+                        console.print('[red]Error: Timeout waiting for c2switcher operation to complete[/red]')
                     sys.exit(1)
 
                 if not shown_waiting_msg:
                     pid_info = self._read_pid()
                     if pid_info:
                         console.print(
-                            f"[yellow]Waiting for another c2switcher operation to complete (PID: {pid_info})...[/yellow]"
+                            f'[yellow]Waiting for another c2switcher operation to complete (PID: {pid_info})...[/yellow]'
                         )
                     else:
-                        console.print("[yellow]Waiting for another c2switcher operation to complete...[/yellow]")
+                        console.print('[yellow]Waiting for another c2switcher operation to complete...[/yellow]')
                     shown_waiting_msg = True
 
                 time.sleep(0.1)
 
             except Exception as exc:
-                console.print(f"[red]Error acquiring lock: {exc}[/red]")
+                console.print(f'[red]Error acquiring lock: {exc}[/red]')
                 sys.exit(1)
 
-        console.print(f"[red]Error: Maximum retries ({max_retries}) exceeded waiting for lock[/red]")
+        console.print(f'[red]Error: Maximum retries ({max_retries}) exceeded waiting for lock[/red]')
         sys.exit(1)
 
     def _read_pid(self) -> Optional[str]:
         """Read PID from lock file for debugging."""
         try:
             if self.pid_path.exists():
-                with open(self.pid_path, "r") as handle:
+                with open(self.pid_path, 'r') as handle:
                     return handle.read().strip()
         except Exception:
             pass
@@ -128,4 +128,3 @@ def acquire_lock():
     lock.acquire()
     _lock_acquired = lock
     atexit.register(_release_lock)
-
