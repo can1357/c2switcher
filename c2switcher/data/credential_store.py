@@ -10,8 +10,13 @@ from typing import Dict
 
 import requests
 
+from typing import TYPE_CHECKING
+
 from ..constants import CLAUDE_DIR, CREDENTIALS_PATH, console
 from ..core.errors import InvalidCredentials, TokenUnavailable
+
+if TYPE_CHECKING:
+    from ..core.models import Account
 
 
 class CredentialStore:
@@ -127,6 +132,27 @@ class CredentialStore:
             if temp_path.exists():
                 temp_path.unlink()
             raise
+
+    def write_credentials_for_account(self, account: 'Account', oauth_credentials: Dict):
+        """
+        Write credentials for account, using API key format when available.
+
+        When the account has an api_key, writes a simplified format:
+        {"claudeAiOauth": {"accessToken": "<api_key>", "scopes": ["user:inference"]}}
+
+        Otherwise writes the full OAuth credentials.
+        """
+        if account.api_key:
+            credentials = {
+                'claudeAiOauth': {
+                    'accessToken': account.api_key,
+                    'scopes': ['user:inference'],
+                }
+            }
+        else:
+            credentials = oauth_credentials
+
+        self.write_credentials(credentials)
 
     def refresh_and_persist(self, credentials_json: str, force: bool = False, dry_run: bool = False) -> Dict:
         """

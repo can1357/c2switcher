@@ -72,7 +72,7 @@ class SwitchingService:
                 if not dry_run:
                     refreshed_creds = reused.account.get_credentials()
                     if not token_only:
-                        self.credential_store.write_credentials(refreshed_creds)
+                        self.credential_store.write_credentials_for_account(reused.account, refreshed_creds)
                 return reused
 
         # Get all accounts
@@ -154,7 +154,7 @@ class SwitchingService:
             refreshed_creds = self.credential_store.refresh_access_token(selected.account.credentials_json)
 
             if not token_only:
-                self.credential_store.write_credentials(refreshed_creds)
+                self.credential_store.write_credentials_for_account(selected.account, refreshed_creds)
 
             # Update stored credentials if changed
             if refreshed_creds != selected.account.get_credentials():
@@ -182,7 +182,7 @@ class SwitchingService:
         refreshed_creds = self.credential_store.refresh_access_token(account.credentials_json)
 
         if not token_only:
-            self.credential_store.write_credentials(refreshed_creds)
+            self.credential_store.write_credentials_for_account(account, refreshed_creds)
 
         # Update stored credentials if changed
         if refreshed_creds != account.get_credentials():
