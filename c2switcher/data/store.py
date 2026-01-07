@@ -48,7 +48,7 @@ class Store:
         except OSError:
             pass
 
-        self.conn = sqlite3.connect(str(self.db_path), timeout=5)
+        self.conn = sqlite3.connect(str(self.db_path), timeout=5, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
 
         try:

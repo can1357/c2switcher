@@ -63,11 +63,49 @@ def _get_account_usage(store, account_uuid: str, credentials_json: str, force: b
         raise ValueError('No access token found in credentials')
 
     usage = ClaudeAPI.get_usage(token)
+
+    # Check if API returned all nulls (intermittent API bug)
+    has_data = any([
+        usage.get('five_hour'),
+        usage.get('seven_day'),
+        usage.get('seven_day_sonnet'),
+    ])
+
+    if not has_data:
+        # Fall back to cached data (up to 24h old)
+        cached = store.get_recent_usage(account_uuid, max_age_seconds=86400, require_data=True)
+        if cached:
+            cache_age = None
+            try:
+                cache_dt = datetime.fromisoformat(cached.queried_at.replace('Z', '+00:00'))
+                cache_age = max((datetime.now(timezone.utc) - cache_dt).total_seconds(), 0)
+            except Exception:
+                cache_age = None
+
+            return {
+                'five_hour': {'utilization': cached.five_hour.utilization},
+                'seven_day': {
+                    'utilization': cached.seven_day.utilization,
+                    'resets_at': cached.seven_day.resets_at,
+                },
+                'seven_day_opus': {
+                    'utilization': cached.seven_day_opus.utilization,
+                    'resets_at': cached.seven_day_opus.resets_at,
+                },
+                'seven_day_sonnet': {
+                    'utilization': cached.seven_day_sonnet.utilization,
+                    'resets_at': cached.seven_day_sonnet.resets_at,
+                },
+                '_cache_source': 'fallback',
+                '_cache_age_seconds': cache_age,
+                '_queried_at': cached.queried_at,
+            }
+
     usage['_cache_source'] = 'live'
     usage['_cache_age_seconds'] = 0.0
     usage['_queried_at'] = datetime.now(timezone.utc).isoformat()
 
-    # Save to DB
+    # Save to DB (only if we have actual data)
     store.save_usage(account_uuid, usage)
 
     # Update credentials if changed
