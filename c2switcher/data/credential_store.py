@@ -89,7 +89,18 @@ class CredentialStore:
             )
 
             if response.status_code != 200:
-                raise TokenUnavailable(f'OAuth endpoint returned {response.status_code}')
+                error_msg = f'OAuth endpoint returned {response.status_code}'
+                try:
+                    error_data = response.json()
+                    error_type = error_data.get('error', '')
+                    error_desc = error_data.get('error_description', '')
+                    if error_type == 'invalid_grant':
+                        error_msg = f'Refresh token expired/revoked: {error_desc}. Re-authenticate with: c2switcher login'
+                    elif error_type or error_desc:
+                        error_msg = f'OAuth error ({response.status_code}): {error_type} - {error_desc}'
+                except (ValueError, KeyError):
+                    pass
+                raise TokenUnavailable(error_msg)
 
             token_data = response.json()
 
