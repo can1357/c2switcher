@@ -29,7 +29,7 @@ class CredentialStore:
     - Provide dry-run mode for testing
     """
 
-    OAUTH_ENDPOINT = 'https://console.anthropic.com/v1/oauth/token'
+    OAUTH_ENDPOINT = 'https://platform.claude.com/v1/oauth/token'
     CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
     REFRESH_BUFFER_MS = 600_000  # 10 minutes
 
