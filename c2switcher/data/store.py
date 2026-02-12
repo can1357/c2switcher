@@ -438,11 +438,10 @@ class Store:
                 ),
             )
 
-            account = self.get_account_by_uuid(uuid)
-
-            # Invalidate accounts cache
+            # Refresh cache before lookup
             self._load_accounts_cache()
 
+            account = self.get_account_by_uuid(uuid)
             return account, True
 
     def update_credentials(self, account_uuid: str, credentials: Dict):

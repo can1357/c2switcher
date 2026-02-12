@@ -5,7 +5,7 @@
 #   c2claude [options] [claude arguments...]
 #
 # Options:
-#   -1, -2, -3       Switch to account by index (0, 1, 2)
+#   -0, -1, -2       Switch to account by index (0, 1, 2)
 #   -a, --account N  Switch to account N (by index, nickname, or email)
 #   -o, --optimal    Use the optimal account (lowest usage)
 #   -c, --cycle      Cycle to the next account
@@ -17,8 +17,8 @@
 #   C2_ACCOUNT_LABEL         - Account label (nickname, display name, or email)
 #
 # Examples:
-#   c2claude -1            # Switch to account 0 and run claude
-#   c2claude -2 -p hi      # Switch to account 1 and run claude -p hi
+#   c2claude -0            # Switch to account 0 and run claude
+#   c2claude -1 -p hi      # Switch to account 1 and run claude -p hi
 #   c2claude --optimal     # Use optimal account with load balancing
 #   c2claude --cycle       # Cycle to next account
 #   c2claude               # Use load-balanced account selection
@@ -64,17 +64,17 @@ trap cleanup_session EXIT INT TERM HUP QUIT
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -1)
+        -0)
             selected_account="0"
             use_optimal=false
             shift
             ;;
-        -2)
+        -1)
             selected_account="1"
             use_optimal=false
             shift
             ;;
-        -3)
+        -2)
             selected_account="2"
             use_optimal=false
             shift

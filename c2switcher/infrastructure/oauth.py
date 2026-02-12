@@ -18,9 +18,9 @@ class OAuthConfig:
 
     CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
     AUTHORIZE_URL = 'https://claude.ai/oauth/authorize'
-    REDIRECT_URI = 'https://console.anthropic.com/oauth/code/callback'
-    TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token'
-    SCOPES = ['org:create_api_key', 'user:profile', 'user:inference']
+    REDIRECT_URI = 'https://platform.claude.com/oauth/code/callback'
+    TOKEN_URL = 'https://platform.claude.com/v1/oauth/token'
+    SCOPES = ['org:create_api_key', 'user:profile', 'user:inference', 'user:sessions:claude_code', 'user:mcp_servers']
 
 
 class PKCEGenerator:
@@ -198,7 +198,7 @@ class OAuthClient:
         OAuthCallbackHandler.success_redirect_url = (
             'https://claude.ai/oauth/code/success?app=claude-code'
             if is_inference_only
-            else 'https://console.anthropic.com/oauth/code/success?app=claude-code'
+            else 'https://platform.claude.com/oauth/code/success?app=claude-code'
         )
 
     def login(self, auto_open: bool = True, use_dual_flow: bool = True) -> Dict:
@@ -240,8 +240,8 @@ class OAuthClient:
         automatic_url = self.build_authorize_url(code_challenge, state, automatic_redirect)
         manual_url = self.build_authorize_url(code_challenge, state, manual_redirect)
 
-        print('\n🔐 Opening browser for authentication...')
-        print("\n💡 If browser doesn't open or localhost fails, use this URL:")
+        print('\nOpening browser for authentication...')
+        print("\nIf browser doesn't open or localhost fails, use this URL:")
         print(f'{manual_url}\n')
 
         # Open automatic URL first (preferred)
@@ -255,39 +255,49 @@ class OAuthClient:
                 except Exception:
                     pass
 
-        # Wait for EITHER:
-        # 1. Automatic callback (HTTP server receives code)
-        # 2. Manual input (user pastes code)
-        print('Waiting for authorization...')
-        print('(Or paste code manually if prompted) > ', end='', flush=True)
-
+        # Race: localhost callback vs manual paste
         code = None
         used_automatic = False
+        got_code = threading.Event()
 
-        # Check server with timeout
-        for _ in range(60):  # 60 second timeout
+        def wait_for_server():
+            nonlocal code, used_automatic
+            server_thread.join(timeout=120)
             if OAuthCallbackHandler.authorization_code:
                 code = OAuthCallbackHandler.authorization_code
                 used_automatic = True
-                print('\n✓ Received automatic callback')
-                break
-            time.sleep(1)
+                got_code.set()
 
-        # If no automatic callback, check for manual input
-        if not code:
-            import sys
-            import select
+        watcher = threading.Thread(target=wait_for_server, daemon=True)
+        watcher.start()
 
-            # Check if input is available (non-blocking)
-            if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
-                manual_code = sys.stdin.readline().strip()
-                if manual_code:
-                    code = manual_code
-                    print('\n✓ Using manual code')
+        print('Waiting for authorization (paste code or complete in browser)...')
+        try:
+            while not got_code.is_set():
+                # Check every 0.5s if server got it; if not, try non-blocking read
+                if got_code.wait(timeout=0.5):
+                    break
+                # Try reading a line from stdin (blocks until user hits enter)
+                import sys
+                import select
+                if select.select([sys.stdin], [], [], 0)[0]:
+                    manual_code = sys.stdin.readline().strip()
+                    if manual_code:
+                        if '#' in manual_code:
+                            manual_code = manual_code.split('#')[0]
+                        code = manual_code
+                        break
+        except (EOFError, KeyboardInterrupt):
+            pass
+
+        if used_automatic:
+            print('Received automatic callback')
+        elif code:
+            print('Using manual code')
 
         if not code:
             server.server_close()
-            raise ValueError('No authorization code received (timeout)')
+            raise ValueError('No authorization code received')
 
         # Exchange code for tokens with correct redirect_uri
         redirect_uri = automatic_redirect if used_automatic else manual_redirect
@@ -332,6 +342,10 @@ class OAuthClient:
         # Prompt for code
         print('Paste code here if prompted >')
         code = input().strip()
+
+        # Strip #state fragment if present
+        if '#' in code:
+            code = code.split('#')[0]
 
         if not code:
             raise ValueError('No authorization code provided')
